@@ -15,8 +15,9 @@ that the answer holds.
 **Why a clean result is not automatically a proof.** A transcript showing "no network call was
 observed" is produced equally well by an import that is genuinely inert and by a guard that silently
 failed to install. An empty span-processor list is produced equally well by a provider that holds no
-processors and by an attribute lookup that did not resolve. Sections 3 through 5 exist because of
-that: each is one of the two halves of this proof shown reporting the *bad* answer, on demand.
+processors and by an attribute lookup that did not resolve. Sections 3 through 6 exist because of
+that: each shows one part of this proof reporting the *bad* answer, on demand. Section 6 in
+particular records a false pass that the first draft of these assertions allowed through.
 
 **Scope and boundaries.**
 
@@ -62,7 +63,7 @@ The probe is a separate process for a second reason: this repository's own test 
 MLflow elsewhere, so an in-process `"mlflow" in sys.modules` assertion would report test ordering
 rather than import purity.
 
-## What the five sections prove
+## What the six sections prove
 
 | Section | Command | Proves |
 |---|---|---|
@@ -71,6 +72,7 @@ rather than import purity.
 | 3 | The same probe with a module-level connection planted in the shipped package | The probe detects a real PKG-09 breach and exits non-zero. |
 | 4 | The same probe under a guard that loads but installs nothing | `guard_live` can report `False`; it is not a constant. |
 | 5 | The same probe with no guard directory on `PYTHONPATH` | The probe refuses to measure anything when the guard never loaded. |
+| 6 | `scan_module_level_registration` over the package | No code path could install global tracing state at *any* point during an import — and the scan is shown finding a planted one. |
 
 ---
 
@@ -120,8 +122,8 @@ configure time (T-01-34, OI-02).
 
 ```
 $ .venv/bin/python -m pytest tests/unit/test_import_purity.py -q
-......                                                                   [100%]
-6 passed in 0.05s
+............                                                             [100%]
+12 passed in 0.07s
 ```
 
 ## 3. A real breach, planted and reverted
@@ -142,7 +144,7 @@ Traceback (most recent call last):
     import revenium_mlflow  # noqa: E402
   File "/…/src/revenium_mlflow/__init__.py", line 71, in <module>
     from .diagnostics import ConnectionDiagnostics, validate_connection
-  File "/…/src/revenium_mlflow/diagnostics.py", line 113, in <module>
+  File "/…/src/revenium_mlflow/diagnostics.py", line 110, in <module>
     _planted_socket.create_connection(("127.0.0.1", 9), timeout=0.01)
   File "/…/tests/import_purity/sitecustomize.py", line 38, in _blocked
     raise RuntimeError(_MESSAGE)
@@ -165,13 +167,18 @@ FAILED tests/unit/test_import_purity.py::test_the_probe_exits_zero_and_prints_it
 FAILED tests/unit/test_import_purity.py::test_the_import_loads_neither_mlflow_nor_the_compat_module
 FAILED tests/unit/test_import_purity.py::test_the_import_installs_no_global_span_processor
 FAILED tests/unit/test_import_purity.py::test_the_empty_processor_list_is_attributable_to_a_named_provider
+FAILED tests/unit/test_import_purity.py::test_the_global_tracer_provider_was_never_installed
 FAILED tests/unit/test_import_purity.py::test_the_socket_guard_is_proven_live_rather_than_assumed
-FAILED tests/unit/test_import_purity.py::test_the_transcript_records_the_probe_output
-6 failed in 0.06s
+6 failed, 6 passed in 0.07s
 ```
 
 The planted lines were then removed. `git status --short src/` reports no modification, and section 1
 was re-run afterwards and reproduced byte-for-byte.
+
+The one test *not* in that list is `test_the_transcript_records_the_probe_output`. It reads the
+probe's **stdout**, and a probe that dies inside the import statement writes only to stderr, so it
+has no lines to compare. That is a known and accepted weakness in a single test; it is not
+load-bearing, because the six assertions above it fail on exactly the condition it misses.
 
 ## 4. The guard reporting its own absence
 
@@ -215,6 +222,106 @@ import-purity guard was not loaded at start-up: 'sitecustomize' is absent from s
 return code: 1
 ```
 
+## 6. The structural half: no module-level registration anywhere in the package
+
+Sections 1 through 5 all describe a **completed** import. That is a weaker claim than PKG-09 needs.
+A partially-completed import is a real state an application can observe — an interpreter shutting
+down mid-import, an `ImportError` caught by a caller, a `KeyboardInterrupt` — and no transcript
+taken after the fact can speak to it.
+
+`tests/unit/test_import_purity.py` therefore carries a second, structural proof:
+`scan_module_level_registration` parses each shipped module and reports any call to a global
+tracing registration function that would execute during the import. It walks module scope and the
+bodies of `if` / `try` / `with` / `for` / `while` — all of which run at import time — and stops at
+function, method, class and lambda bodies, because a *deferred* registration is precisely the D-12
+design and Phase 4's real `configure_dual_export` will contain one. Decorator and base-class
+expressions are walked even though the bodies they are attached to are not, since those expressions
+do evaluate at import time.
+
+```
+$ .venv/bin/python -c "
+import sys; sys.path.insert(0,'tests/unit')
+from pathlib import Path
+import test_import_purity as t, test_private_access_wall as w
+print(sum(len(t.scan_module_level_registration(p)) for p in w.iter_package_modules(Path('src/revenium_mlflow'))))
+"
+0
+```
+
+### The plant that changed the assertions
+
+A module-scope registration was added to `src/revenium_mlflow/tracing/processor.py` — guarded by an
+environment check, so it takes the shape an auto-install would realistically take rather than the
+naive one:
+
+```python
+import os
+
+from opentelemetry import trace as _planted_trace
+
+if not os.environ.get("REVENIUM_MLFLOW_DISABLE_AUTOINSTALL"):
+    _planted_trace.set_tracer_provider(object())
+```
+
+The scanner found it, and so did the package-wide assertion:
+
+```
+--- scanner count ---
+1
+```
+
+**The subprocess probe did not.** This is the part worth recording:
+
+```
+--- probe ---
+mlflow_imported=False
+compat_imported=False
+provider_kind=object
+provider_processors=[]
+guard_live=True
+return code: 0
+```
+
+`provider_processors=[]`, and exit code 0 — with global tracing state installed. The mechanism is
+that `set_tracer_provider(object())` had succeeded, so the process-global provider was the planted
+object, and that object carries no span-processor collection for the probe's defensive read to find.
+Every assertion about the processor list passed on a tree that violates PKG-09.
+
+Two things follow. First, `provider_kind` earned its place: `object` is visibly not
+`ProxyTracerProvider`, and it is the only line in that block that changed. Second, asserting merely
+that `provider_kind` is *non-empty* — which is what the plan specified, and what the first draft of
+these tests did — is not enough. A `test_the_global_tracer_provider_was_never_installed` assertion
+was added, comparing the printed kind against `ProxyTracerProvider.__name__` read off the installed
+OpenTelemetry API. An empty processor list on a provider that exists at all is not proof that
+nothing was installed; the absence of any global provider is.
+
+With that assertion in place the planted tree fails three tests rather than one:
+
+```
+--- pytest ---
+=========================== short test summary info ============================
+FAILED tests/unit/test_import_purity.py::test_the_global_tracer_provider_was_never_installed
+FAILED tests/unit/test_import_purity.py::test_the_transcript_records_the_probe_output
+FAILED tests/unit/test_import_purity.py::test_no_module_in_the_package_registers_global_state_at_import
+3 failed, 9 passed in 0.08s
+```
+
+The planted lines were then removed. `git status --short src/` reports no modification, the scanner
+returns to `0`, and the suite returns to `12 passed`.
+
+### The scanner's own controls
+
+Three of the scanner's tests are permanent controls rather than assertions about the package, for the
+same reason section 3 exists: a clean scan is exactly what a scanner that finds nothing produces.
+
+| Control | Asserted |
+|---|---|
+| A registration at plain module scope | Exactly one finding, carrying the line number |
+| The same call inside a function body and a method body | Zero findings — a deferred call is the design, not a violation |
+| Registrations inside module-scope `if` and `try` blocks | Two findings — a conditional registration cannot hide |
+| A registration in a decorator expression | One finding — the decorated body is deferred, the decorator is not |
+
+
 ---
 
 ## What this does and does not establish
@@ -226,11 +333,10 @@ OpenTelemetry global tracer provider as an uninitialised `ProxyTracerProvider` c
 processors; and it raises nothing. Both halves of that proof are shown reporting the bad answer on
 demand, so neither is a constant.
 
-**Not established by this document.** That the property holds at every point *during* an import
-rather than only after a completed one — an import interrupted partway is a state an application can
-observe, and a transcript taken after the fact cannot speak to it. That gap is closed structurally by
-the module-level registration scan in section 6, which reasons about the source rather than about one
-completed run.
+**Established structurally rather than by observation.** That no code path in the package could
+install global tracing state at *any* point during an import, not merely by the end of one — section
+6, which reasons about the source rather than about a single completed run, and which closes the
+interrupted-import edge that sections 1 through 5 cannot speak to.
 
 **Also not established.** Anything about a released, published, or CI-verified artifact. None of
 those exist.

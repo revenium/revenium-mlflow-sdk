@@ -38,12 +38,15 @@ oversight: the cheap guard fails in the same commit that would break the
 property, and this file proves the property comprehensively.
 """
 
+import ast
 import os
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from opentelemetry.trace import ProxyTracerProvider
 
 from tests.unit.test_private_access_wall import iter_package_modules
 
@@ -156,6 +159,30 @@ def test_the_empty_processor_list_is_attributable_to_a_named_provider(
     assert probe_facts["provider_kind"], "the probe emitted no provider kind"
 
 
+def test_the_global_tracer_provider_was_never_installed(probe_facts: dict[str, str]) -> None:
+    """The stronger half of T-01-33, and the reason it is asserted separately.
+
+    ``provider_processors=[]`` is a weaker claim than it looks. It was planted
+    against during this plan's execution — a module-scope
+    ``trace.set_tracer_provider(object())`` in a shipped module — and the probe
+    still printed an empty processor list and exited 0, because the object that
+    had just been installed as the process-global tracer provider carried no
+    processor collection for the defensive read to find. Global tracing state
+    had been installed and every assertion about the processor list passed.
+
+    So the load-bearing assertion is this one: after the import, the global
+    provider must still be the OpenTelemetry API's ``ProxyTracerProvider``, the
+    placeholder returned when nothing has installed a provider at all. Anything
+    else — including a perfectly empty ``TracerProvider`` — means something
+    called ``set_tracer_provider`` during the import, which is the violation.
+
+    The expected name is read off the installed class rather than written out,
+    so a rename in OpenTelemetry surfaces as a failure to look at rather than as
+    a literal quietly matching nothing.
+    """
+    assert probe_facts["provider_kind"] == ProxyTracerProvider.__name__
+
+
 def test_the_socket_guard_is_proven_live_rather_than_assumed(
     probe_facts: dict[str, str],
 ) -> None:
@@ -219,6 +246,17 @@ class Installer:
         provider.add_span_processor(object())
 """
 
+#: A registration reached through a decorator. The decorated function's body
+#: never runs at import time; the decorator expression does.
+_DIRTY_DECORATOR = """
+from opentelemetry import trace
+
+
+@trace.set_tracer_provider(object())
+def handler() -> None:
+    pass
+"""
+
 #: Registration hidden inside module-scope ``if`` and ``try`` blocks. Both
 #: bodies execute at import time; only the indentation differs from the naive
 #: case.
@@ -237,6 +275,109 @@ try:
 except ImportError:
     pass
 """
+
+
+#: The functions that install process-global tracing state. Matched on the
+#: trailing attribute or the bare name, so ``trace.set_tracer_provider(...)`` and
+#: a ``from ... import set_tracer_provider`` call are caught alike — resolving
+#: the full dotted path would mean re-implementing import resolution to catch a
+#: shorter list of names.
+#:
+#: The last four are deliberately generic. ``enable``, ``disable``, ``configure``
+#: and ``set_destination`` are MLflow's tracing controls, and every one of them
+#: rebuilds the tracer provider and evicts whatever was registered on the old
+#: one. Matching them by bare name will flag an unrelated module-scope
+#: ``configure()`` if this package ever grows one. That trade is taken on
+#: purpose: the false positive costs one reviewer one minute and is visible in
+#: a diff, while the false negative is a silent global mutation at import time.
+_REGISTRATION_CALLS = frozenset(
+    {
+        # OpenTelemetry: the global provider setter and the processor-adding
+        # method on a provider.
+        "set_tracer_provider",
+        "add_span_processor",
+        # MLflow's tracing controls, each of which replaces the provider.
+        "enable",
+        "disable",
+        "configure",
+        "set_destination",
+        # This package's own configuration entry point (D-12: configure time,
+        # never import time).
+        "configure_dual_export",
+    }
+)
+
+#: Nodes whose bodies are *deferred*: compiled when the module is imported, but
+#: executed later, or never. The scan stops at their boundary, because a
+#: deferred registration call is exactly the D-12 design — Phase 4's real
+#: ``configure_dual_export`` will contain one — and a scanner that flagged it
+#: would be deleted rather than fixed.
+#:
+#: Everything else under a module-scope statement runs during the import and
+#: stays in scope: the bodies of ``if``, ``try`` (including ``else``, ``except``
+#: and ``finally``), ``with``, ``for`` and ``while``. A registration hidden
+#: behind a capability check is the shape one would realistically take, so a
+#: scan that read only the flat top-level statement list would catch the naive
+#: case and miss the plausible one.
+_DEFERRED_BODIES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+
+
+def _calls_executed_now(node: ast.AST) -> Iterator[ast.Call]:
+    """Yield every call under ``node`` that runs while ``node`` is executed.
+
+    Decorator lists and class base expressions are walked even though the body
+    they are attached to is not: those expressions *are* evaluated at import
+    time, so a decorator that registers a span processor would install global
+    state as surely as a bare statement would.
+    """
+    if isinstance(node, _DEFERRED_BODIES):
+        evaluated_now = [
+            *getattr(node, "decorator_list", []),
+            *getattr(node, "bases", []),
+        ]
+        for expression in evaluated_now:
+            yield from _calls_executed_now(expression)
+        return
+
+    if isinstance(node, ast.Call):
+        yield node
+    for child in ast.iter_child_nodes(node):
+        yield from _calls_executed_now(child)
+
+
+def _called_name(call: ast.Call) -> str | None:
+    """The trailing attribute of a call, or its bare name.
+
+    Resolving the full dotted path back through the import statements would mean
+    re-implementing import resolution to catch a strictly shorter list of names.
+    Matching the trailing component instead catches
+    ``trace.set_tracer_provider(...)`` and a bare ``set_tracer_provider(...)``
+    imported by name alike.
+    """
+    if isinstance(call.func, ast.Attribute):
+        return call.func.attr
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    return None
+
+
+def scan_module_level_registration(path: Path) -> list[str]:
+    """Report every import-time call to a global tracing registration function.
+
+    Returns:
+        One string per finding, formatted ``path:lineno name``, so a failure
+        message points at the line rather than at the file.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+    findings = [
+        (call.lineno, name)
+        for statement in tree.body
+        for call in _calls_executed_now(statement)
+        if (name := _called_name(call)) in _REGISTRATION_CALLS
+    ]
+
+    return [f"{path}:{lineno} {name}" for lineno, name in sorted(findings)]
 
 
 def test_no_module_in_the_package_registers_global_state_at_import() -> None:
@@ -299,3 +440,21 @@ def test_a_conditional_registration_cannot_hide_from_the_scanner(tmp_path: Path)
         "set_tracer_provider",
         "configure_dual_export",
     ], findings
+
+
+def test_a_registration_reached_through_a_decorator_is_still_import_time(
+    tmp_path: Path,
+) -> None:
+    """A decorator expression evaluates during the import that defines it.
+
+    The scan stops at a function body on purpose, and the obvious way to write
+    that stop — skip the whole ``FunctionDef`` node — would also skip the
+    decorator list attached to it, which is not deferred at all.
+    """
+    subject = tmp_path / "dirty_decorator.py"
+    subject.write_text(_DIRTY_DECORATOR, encoding="utf-8")
+
+    findings = scan_module_level_registration(subject)
+
+    assert len(findings) == 1, findings
+    assert findings[0].endswith(" set_tracer_provider"), findings
