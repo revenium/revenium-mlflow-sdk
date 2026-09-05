@@ -161,8 +161,12 @@ def test_construction_reads_no_environment_variable(monkeypatch: pytest.MonkeyPa
         observed.append(key)
         return real_environ_get(key, default)
 
-    monkeypatch.setattr(os.environ, "get", _recording_get)
+    # Planted first, and only then is the recorder installed: ``setenv`` reads
+    # ``os.environ.get`` itself to save the value it will restore, so recording
+    # across it would attribute pytest's own bookkeeping to the constructor.
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://example.invalid/v1/traces")
+    monkeypatch.setattr(os.environ, "get", _recording_get)
+    observed.clear()
 
     config = ReveniumConfig()
 
