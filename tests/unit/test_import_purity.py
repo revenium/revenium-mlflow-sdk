@@ -45,6 +45,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.unit.test_private_access_wall import iter_package_modules
+
 pytestmark = pytest.mark.unit
 
 #: Resolved from this file rather than from the working directory, so the test
@@ -53,6 +55,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PROBE_DIR = _REPO_ROOT / "tests" / "import_purity"
 _PROBE = _PROBE_DIR / "check_import.py"
 _TRANSCRIPT = _REPO_ROOT / "docs" / "verification" / "pkg-09-import-purity.md"
+_PACKAGE_ROOT = _REPO_ROOT / "src" / "revenium_mlflow"
 
 #: The five keys the probe prints, in the order it must print them. Asserting
 #: the sequence — not just the presence of each key — is what makes "exactly
@@ -174,3 +177,125 @@ def test_the_transcript_records_the_probe_output(
     for line in probe.stdout.strip().splitlines():
         assert line in transcript, f"transcript is missing {line!r}"
     assert f"return code: {probe.returncode}" in transcript
+
+
+# ---------------------------------------------------------------------------
+# The structural half of PKG-09: no code path could install global tracing
+# state, whether or not an import runs to completion.
+#
+# The subprocess probe above shows the state is clean after a *completed*
+# import. That is not the same claim. A partially-completed import is a real
+# state an application can observe — an interpreter shutting down mid-import, an
+# ImportError caught by a caller, a KeyboardInterrupt — and a transcript taken
+# after the fact cannot speak to it. Proving that no module-level registration
+# call exists anywhere in the package is the stronger statement, because it
+# holds at every point during an import rather than at one point after it.
+# ---------------------------------------------------------------------------
+
+#: A registration call at plain module scope. The call is on line 6 of the
+#: string below, counting the leading newline as line 1.
+_DIRTY_MODULE_SCOPE = """
+from opentelemetry.sdk.trace import TracerProvider
+
+provider = TracerProvider()
+
+provider.add_span_processor(object())
+"""
+
+#: The same call, deferred into a function body — the D-12 design, and what
+#: Phase 4's real ``configure_dual_export`` will look like.
+_CLEAN_DEFERRED = """
+from opentelemetry.sdk.trace import TracerProvider
+
+
+def configure() -> None:
+    provider = TracerProvider()
+    provider.add_span_processor(object())
+
+
+class Installer:
+    def install(self) -> None:
+        provider = TracerProvider()
+        provider.add_span_processor(object())
+"""
+
+#: Registration hidden inside module-scope ``if`` and ``try`` blocks. Both
+#: bodies execute at import time; only the indentation differs from the naive
+#: case.
+_DIRTY_CONDITIONAL = """
+import os
+
+from opentelemetry import trace
+
+if os.environ.get("SOMETHING"):
+    trace.set_tracer_provider(object())
+
+try:
+    import revenium_mlflow
+
+    revenium_mlflow.configure_dual_export()
+except ImportError:
+    pass
+"""
+
+
+def test_no_module_in_the_package_registers_global_state_at_import() -> None:
+    """The claim itself, across every shipped module."""
+    modules = list(iter_package_modules(_PACKAGE_ROOT))
+
+    assert modules, f"scanned nothing under {_PACKAGE_ROOT} — the walk is broken"
+
+    findings = {str(path): scan_module_level_registration(path) for path in modules}
+    assert not any(findings.values()), findings
+
+
+def test_the_scanner_detects_a_module_scope_registration_call(tmp_path: Path) -> None:
+    """The scanner finds what it claims to find.
+
+    Without this, the assertion above is satisfied equally well by a function
+    that returns an empty list for every input.
+    """
+    subject = tmp_path / "dirty_module_scope.py"
+    subject.write_text(_DIRTY_MODULE_SCOPE, encoding="utf-8")
+
+    findings = scan_module_level_registration(subject)
+
+    assert len(findings) == 1, findings
+    path, _, rest = findings[0].partition(":")
+    assert path.endswith("dirty_module_scope.py")
+    lineno, _, symbol = rest.partition(" ")
+    assert lineno == "6", findings
+    assert symbol == "add_span_processor", findings
+
+
+def test_the_scanner_ignores_a_deferred_registration_call(tmp_path: Path) -> None:
+    """A deferred call is the D-12 design, not a violation.
+
+    A scanner that flagged it would fire on the real Phase 4 implementation of
+    ``configure_dual_export``, and would be deleted rather than fixed.
+    """
+    subject = tmp_path / "clean_deferred.py"
+    subject.write_text(_CLEAN_DEFERRED, encoding="utf-8")
+
+    assert scan_module_level_registration(subject) == []
+
+
+def test_a_conditional_registration_cannot_hide_from_the_scanner(tmp_path: Path) -> None:
+    """Module-scope ``if`` and ``try`` bodies still execute at import time.
+
+    This is the shape a registration would actually take if one were ever added
+    — guarded by a capability check or wrapped in a ``try`` — so a scanner that
+    only read the top-level statement list would miss the realistic case and
+    catch only the naive one.
+    """
+    subject = tmp_path / "dirty_conditional.py"
+    subject.write_text(_DIRTY_CONDITIONAL, encoding="utf-8")
+
+    findings = scan_module_level_registration(subject)
+
+    assert len(findings) == 2, findings
+    assert all("dirty_conditional.py" in finding for finding in findings)
+    assert [finding.rsplit(" ", 1)[1] for finding in findings] == [
+        "set_tracer_provider",
+        "configure_dual_export",
+    ], findings
