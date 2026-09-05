@@ -251,3 +251,6 @@ AGENTS.md
 
 # GSD planning artifacts — local-only (commit_docs=false)
 .planning/
+
+# GSD tooling runtime state (dispatch sentinel, run-scoped)
+.gsd/
