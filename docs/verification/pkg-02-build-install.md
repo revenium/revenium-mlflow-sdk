@@ -574,3 +574,62 @@ This transcript proves that the distribution builds, installs into a clean Pytho
 and imports. It does **not** claim that the package is published, released, or production-ready; no
 command run here contacts a package index as a publisher, tags a release, or pushes anything. It
 also makes no claim about CI, which has not run.
+
+---
+
+## 6. Tracer-gate re-run, and one defect the re-run exposed
+
+Task 1 is a tracer task, so its verification was re-run end to end after the task commit rather than
+trusted from the first pass. The re-run found a defect the first pass could not have found.
+
+**`uv venv --python 3.10 .venv` is not idempotent.** On uv 0.11.17 it succeeds against a clean tree
+and then fails on every subsequent run:
+
+```console
+$ uv venv --python 3.10 .venv
+Using CPython 3.10.20
+Creating virtual environment at: .venv
+error: Failed to create virtual environment
+  Caused by: A virtual environment already exists at: .venv
+
+hint: Use the `--clear` flag or set `UV_VENV_CLEAR=1` to replace the existing virtual environment
+$ echo $?
+2
+```
+
+This matters beyond the gate. The same command is the first line of the documented developer setup,
+so every contributor who runs setup twice hits a non-zero exit; and because the failure is an early
+link in a `&&` chain, a naive check that only inspects the *artifacts* at the end of the chain reads
+stale files from the previous run and reports a false PASS. The correct form is explicit:
+
+```bash
+uv venv --python 3.10 --clear .venv
+```
+
+`--clear` also makes the environment genuinely fresh, which is what the evidence is supposed to
+show. `CONTRIBUTING.md` documents this form.
+
+**Gate results after the fix**, each block re-run from a rebuilt `dist/`:
+
+| Block | Check | Result |
+|---|---|---|
+| V1 | `--clear` venv, install `build`, `rm -rf dist`, `python -m build`, `ls dist` | PASS — `whl=1 tar.gz=1 total=2` |
+| V2 | `unzip -l dist/*.whl \| grep -c 'revenium_mlflow/py.typed'` | PASS — `1` |
+| V3 | `tar tzf dist/*.tar.gz \| grep -c 'src/revenium_mlflow/py.typed'` | PASS — `1` |
+| V4 | clean-venv install, version, normalized names, `py.typed` | PASS — `0.1.0` / `['0.1.0', '0.1.0', '0.1.0']` / `True` |
+| V5 | two concurrent installs, frozen lines diffed | PASS — identical; `mlflow==3.16.0`, `opentelemetry-sdk==1.44.0` |
+| V6 | `uv pip install --python .venv/bin/python -e ".[dev]"` and import | PASS — `0.1.0` |
+
+**Secondary finding: `tomllib` is unavailable on the 3.10 floor.** It entered the standard library
+in 3.11, so any tooling in this repository that parses TOML must fall back to `tomli` (already
+present transitively via `build`) rather than assume `tomllib`:
+
+```python
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
+```
+
+Recorded here because later plans in this phase parse configuration files and would otherwise fail
+only on the floor interpreter — the leg most likely to be exercised last.
