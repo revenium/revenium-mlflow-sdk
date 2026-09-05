@@ -7,7 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- `scripts/version_matrix.sh` — the version matrix, and the single definition of it. Four legs: the
+  declared MLflow floor, a median 3.x and the newest 3.x resolved at run time, each on the Python
+  3.10 floor, plus the newest MLflow on Python 3.14. Every leg pins its interpreter, prints the
+  interpreter and `mlflow.__version__` it actually ran under, and fails if either is not the one the
+  leg exists to test. Captured evidence at `docs/verification/ver-07-version-matrix.md`.
+- `.github/workflows/version-matrix.yml` — a workflow file that invokes that same script, added as
+  provision for a future push. **It has never been executed in this project**, and no hosted build
+  service has run anything for this repository; this entry records that a file was written, not that
+  anything ran. It holds a read-only contents scope, triggers on pull request and manual dispatch
+  only, and carries no step that uploads an artifact, creates a release, pushes a tag, or merges.
+
+### Changed
+
+- `uv.lock` is now ignored rather than left uncovered by `.gitignore`. This distribution is a
+  library: its correctness claim is that anything inside its declared floors resolves and works, and
+  the version matrix substantiates that by resolving independently on every leg. Tracking one
+  resolution would pin what the matrix has to vary. Consumers get reproducibility from their own
+  lockfile resolved over these floors.
 
 ## [0.1.0]
 

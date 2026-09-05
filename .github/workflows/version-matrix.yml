@@ -1,0 +1,62 @@
+# ---------------------------------------------------------------------------
+# Provision only. This file has never been executed in this project.
+#
+# Three things a reader needs to know before trusting anything here:
+#
+# 1. This workflow has never run. No hosted build service has executed anything
+#    for this repository. Nothing in this file may be cited as a result.
+# 2. The authoritative VER-07 evidence is the captured local transcript at
+#    docs/verification/ver-07-version-matrix.md, produced by running
+#    scripts/version_matrix.sh on a developer machine. This file is provision
+#    for a future push and nothing more.
+# 3. The delivery boundary for this project is build artifacts only. There is
+#    deliberately no step here that uploads an artifact anywhere, creates a
+#    release, pushes a tag, or merges a branch, and no credential is
+#    referenced. The token scope below is read-only on repository contents and
+#    nothing else, so whatever an attacker gains by landing a pull request is
+#    the ability to read code they can already read (threat T-01-38).
+#
+# The single substantive step invokes scripts/version_matrix.sh. That is
+# deliberate (D-13): the script is the one definition of the matrix, so a
+# hosted run and a local run cannot describe different matrices, and the matrix
+# stays runnable — and therefore auditable — without a hosted service. Adding
+# leg definitions to this file instead of to the script is how the two drift.
+#
+# The action references below use major-version tags rather than commit SHAs.
+# Pinning to a SHA is the stronger form and is the right thing to do when this
+# workflow is actually adopted; it is not done here because a SHA that has not
+# been verified against the upstream repository would be a fabricated pin, and
+# this project does not contact hosted services during development.
+# ---------------------------------------------------------------------------
+name: version-matrix
+
+# Pull request and manual dispatch only. Deliberately not on tag creation and
+# not on release: those are the triggers a publish path would hang from, and
+# this project has no publish path.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  version-matrix:
+    name: MLflow and interpreter version matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # The script pins every leg's interpreter through `uv venv --python` and
+      # resolves its own MLflow pins at run time, so nothing about the runner's
+      # preinstalled Python matters here. uv provisions 3.10 and 3.14 itself.
+      - name: Run the version matrix
+        run: bash scripts/version_matrix.sh
