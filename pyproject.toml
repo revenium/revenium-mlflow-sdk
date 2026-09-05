@@ -1,0 +1,79 @@
+[build-system]
+# setuptools>=77 is mandatory, not the sibling repositories' >=42: the PEP 639
+# string form `license = "MIT"` below fails to build on 76.1.0 and earlier
+# (bisected in .planning/research/STACK.md — 75.0.0 and 76.1.0 raise
+# ValueError, 77.0.1 is the first release that builds). The failure hides
+# behind `python -m build`'s isolated environment, which fetches the latest
+# setuptools, and only bites on --no-isolation or a constrained CI image.
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "revenium-mlflow"
+version = "0.1.0"
+description = "Revenium-supported economic telemetry for MLflow-instrumented applications. Neither part of, nor endorsed by, the MLflow project."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "Revenium", email = "support@revenium.io" }
+]
+dependencies = [
+    # Depend on the full `mlflow` distribution, never on the tracing-only one:
+    # the latter co-installs against a user's existing skinny install, splices the
+    # `mlflow/` package tree, and degrades GenAI semantic conventions to a silent
+    # no-op. The `<4` upper bound is D-11 — guard the major version where a
+    # public-API break is actually likely, let every 3.x land immediately.
+    "mlflow>=3.15.0,<4",
+    "opentelemetry-api>=1.30.0,<2",
+    # Never pin `opentelemetry-sdk` exactly. The OTLP HTTP exporter requires a
+    # compatible-release match on it, so an exact pin conflicts on upgrade.
+    "opentelemetry-sdk>=1.30.0,<2",
+    # The OTLP exporter meta-package is deliberately NOT used: it drags in the
+    # gRPC exporter and grpcio. Revenium's ingest route is HTTP +
+    # application/x-protobuf, so the HTTP exporter is named directly.
+    "opentelemetry-exporter-otlp-proto-http>=1.30.0,<2",
+    "revenium-python-sdk>=0.7.0,<1",
+    "httpx>=0.27,<1",
+]
+keywords = ["mlflow", "opentelemetry", "otlp", "tracing", "metering", "revenium", "genai", "observability"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/revenium/revenium-mlflow"
+"Bug Tracker" = "https://github.com/revenium/revenium-mlflow/issues"
+"Documentation" = "https://docs.revenium.io"
+"Repository" = "https://github.com/revenium/revenium-mlflow"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=1",
+    "respx>=0.22",
+    "mypy",
+    "build",
+    # Declared explicitly even though nothing in this plan imports it: plan
+    # 01-07 parses the CI workflow file to assert its triggers and permission
+    # scope, and without this line that import resolves only transitively
+    # through `mlflow`, making the assertion's provenance accidental. `mlflow`
+    # already requires PyYAML, so this adds no distribution to the environment.
+    "pyyaml>=6,<7",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+revenium_mlflow = ["py.typed"]
