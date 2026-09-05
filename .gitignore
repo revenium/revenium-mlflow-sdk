@@ -98,7 +98,20 @@ ipython_config.py
 #   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
 #   This is especially recommended for binary packages to ensure reproducibility, and is more
 #   commonly ignored for libraries.
-# uv.lock
+#
+#   Decided in plan 01-07 and enabled deliberately, rather than left commented
+#   out as the upstream template ships it. This distribution is a library: it
+#   declares floors (mlflow>=3.15.0,<4, opentelemetry-*>=1.30.0,<2) and its
+#   correctness claim is that anything inside those floors resolves and works.
+#   A committed lockfile records one resolution, on one platform, and the
+#   VER-07 version matrix exists precisely to exercise four different ones —
+#   so a tracked lock would be a standing invitation to pin the thing the
+#   matrix is supposed to vary, and a leg that quietly installed the locked
+#   MLflow would report a pass while testing nothing. Consumers get their
+#   reproducibility from their own lockfile over this package's floors, which
+#   is the property a library owes them. See docs/verification/
+#   ver-07-version-matrix.md for the recorded rationale.
+uv.lock
 
 # poetry
 #   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
