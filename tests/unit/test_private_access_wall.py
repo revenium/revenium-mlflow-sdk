@@ -43,8 +43,14 @@ _PACKAGE_ROOT = _REPO_ROOT / "src" / "revenium_mlflow"
 #: same scanner is shown finding what it claims to find.
 _PLANTED_FIXTURE = _REPO_ROOT / "tests" / "fixtures" / "planted_private_access.py"
 
-#: The one exempt shipped path — the sanctioned boundary itself.
-_EXEMPT_MODULE = "_compat.py"
+#: The one exempt shipped path — the sanctioned boundary itself. Compared as a
+#: resolved path, never a basename: a basename comparison exempts *any* file
+#: called ``_compat.py`` anywhere in the package, so a later
+#: ``tracing/_compat.py`` would escape this wall entirely while ruff's
+#: path-scoped ``per-file-ignores`` still named only the real one. That
+#: divergence inverts D-06 — the AST half is supposed to be the half that is
+#: harder to weaken silently (T-01-12).
+_EXEMPT_PATH = (_PACKAGE_ROOT / "_compat.py").resolve()
 
 #: Top-level packages whose internals are off limits.
 _WALLED_ROOTS = frozenset({"mlflow", "opentelemetry"})
@@ -175,12 +181,32 @@ def test_the_scanner_detects_the_planted_control_subject() -> None:
 
 def test_no_private_access_outside_the_compat_module() -> None:
     """The wall itself: every shipped module except the one exempt path."""
-    modules = [p for p in iter_package_modules(_PACKAGE_ROOT) if p.name != _EXEMPT_MODULE]
+    modules = [p for p in iter_package_modules(_PACKAGE_ROOT) if p.resolve() != _EXEMPT_PATH]
 
     assert modules, f"scanned nothing under {_PACKAGE_ROOT} — the walk is broken"
 
     breaches = {str(path): scan_private_access(path) for path in modules}
     assert not any(breaches.values()), breaches
+
+
+def test_exactly_one_compat_module_exists() -> None:
+    """The exemption is singular, and stays singular.
+
+    ``test_no_private_access_outside_the_compat_module`` exempts one resolved
+    path. That is only meaningful while one such path exists: a second
+    ``_compat.py`` added in a later phase would be scanned by the wall, but its
+    author's natural next move is a matching ``per-file-ignores`` line, and that
+    one line silences ruff's half too. Asserting the count here makes the second
+    boundary module a deliberate, visible edit to this test rather than a config
+    entry nobody reads (T-01-12).
+    """
+    found = sorted(
+        p.resolve() for p in iter_package_modules(_PACKAGE_ROOT) if p.name == "_compat.py"
+    )
+
+    assert found == [_EXEMPT_PATH], (
+        f"expected exactly one compat module at {_EXEMPT_PATH}, found {found}"
+    )
 
 
 def test_the_compat_module_holds_no_private_access_either() -> None:
@@ -192,7 +218,7 @@ def test_the_compat_module_holds_no_private_access_either() -> None:
     into a visible, deliberate edit to this test rather than one more private
     read disappearing into a module that already has several.
     """
-    compat = _PACKAGE_ROOT / _EXEMPT_MODULE
+    compat = _EXEMPT_PATH
 
     assert compat.is_file(), f"{compat} is missing — the wall has no boundary module"
     assert scan_private_access(compat) == []
