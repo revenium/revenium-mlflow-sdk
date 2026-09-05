@@ -77,3 +77,14 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 revenium_mlflow = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "unit: Unit tests (fast, no external dependencies, no network)",
+    "integration: Integration tests requiring a running service (fake OTLP collector, tracking server)",
+    "e2e: End-to-end tests requiring live services",
+]
+# The default run needs no live services. `integration` and `e2e` are opt-in:
+# run them with `pytest -m integration` or `pytest -m e2e`.
+addopts = "-m 'not e2e and not integration'"
