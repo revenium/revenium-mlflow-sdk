@@ -76,7 +76,7 @@ def test_source_tree_fallback_matches_declared_version() -> None:
     distribution is absent, which is exactly when nobody is looking.
     """
     declared = _pyproject()["project"]["version"]
-    assert revenium_mlflow._FALLBACK_VERSION == declared
+    assert declared == revenium_mlflow._FALLBACK_VERSION
 
 
 @pytest.mark.unit

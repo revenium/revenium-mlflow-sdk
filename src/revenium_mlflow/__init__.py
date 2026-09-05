@@ -14,7 +14,8 @@ tracing state. Importing it must never raise. The MLflow capability probe runs
 at configure time, not import time.
 """
 
-from importlib.metadata import PackageNotFoundError, version as _version
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _version
 
 #: Fallback used when no ``revenium-mlflow`` distribution is installed, which is
 #: the case for a direct run out of the source tree. The authoritative value is

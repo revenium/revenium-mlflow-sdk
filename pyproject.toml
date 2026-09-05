@@ -59,6 +59,16 @@ classifiers = [
 
 [project.optional-dependencies]
 dev = [
+    # D-05: ruff replaces black + isort + flake8 with one tool and one config
+    # block. Both bounds are deliberate — an unbounded specifier lets a major
+    # version, or a substituted distribution, resolve silently. Added only after
+    # a human verified the distribution's PyPI legitimacy — publisher, repository
+    # link, and release history. Two gaps were reviewed and accepted at that
+    # point: the download volume could not be retrieved from any source, and
+    # there is no PEP 740 provenance attestation for the current release, so
+    # publisher identity rests on PyPI metadata and the corroborating repository
+    # rather than on a signed build claim.
+    "ruff>=0.6,<1",
     "pytest>=8",
     "pytest-asyncio>=1",
     "respx>=0.22",
@@ -88,3 +98,32 @@ markers = [
 # The default run needs no live services. `integration` and `e2e` are opt-in:
 # run them with `pytest -m integration` or `pytest -m e2e`.
 addopts = "-m 'not e2e and not integration'"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# pycodestyle errors and warnings, Pyflakes, isort, pyupgrade, flake8-bugbear,
+# flake8-simplify, and the ruff-native rules. The private-member and banned-api
+# families are deliberately absent: plan 01-03 owns them, because they have to
+# land in the same edit as the `_compat` exemption they need.
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.format]
+# The defaults, written down rather than inherited, so a future ruff release
+# changing a default cannot silently reformat this tree.
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+# D-07: strict from day one. The package is empty today, so strict costs nothing
+# now and never has to be retrofitted across six modules later. `strict = true`
+# is recorded here as well as passed on the command line in scripts/check.sh so
+# an editor's language server and the gate read the same setting.
+python_version = "3.10"
+strict = true
+files = ["src/revenium_mlflow"]
+warn_unused_configs = true
+warn_unreachable = true
