@@ -24,9 +24,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from revenium_mlflow.errors import ReveniumMLflowError, UnsupportedMLflowError
 
 from revenium_mlflow import _compat
+from revenium_mlflow.errors import ReveniumMLflowError, UnsupportedMLflowError
 
 pytestmark = pytest.mark.unit
 

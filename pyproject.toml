@@ -106,10 +106,42 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 # pycodestyle errors and warnings, Pyflakes, isort, pyupgrade, flake8-bugbear,
-# flake8-simplify, and the ruff-native rules. The private-member and banned-api
-# families are deliberately absent: plan 01-03 owns them, because they have to
-# land in the same edit as the `_compat` exemption they need.
-select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+# flake8-simplify, and the ruff-native rules, plus the two families that make up
+# the declarative half of the private-access wall (D-06): `SLF` (SLF001,
+# underscore-prefixed member access) and `TID` (TID251, banned imports). They
+# land here rather than in plan 01-02 because they are unusable without the
+# `_compat` exemption below, and an exemption written before the module it
+# exempts is an exemption nobody can check.
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "SLF", "TID"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+# The MLflow modules research identified as internal. Importing them is how the
+# wall gets breached in practice: the private *names* live behind these three
+# module paths, so banning the import stops the access at its source rather than
+# at each use. This is the fast half of the wall — it fires in an editor and in
+# a pre-commit run. The slow, harder-to-weaken half is the AST walk in
+# tests/unit/test_private_access_wall.py (VER-08).
+"mlflow.tracing.provider".msg = "Private MLflow API. Route it through src/revenium_mlflow/_compat.py, the one sanctioned boundary (VER-08). Prefer the public mlflow.tracing.get_bridged_tracer_provider()."
+"mlflow.tracing.processor".msg = "Private MLflow API. Route it through src/revenium_mlflow/_compat.py, the one sanctioned boundary (VER-08)."
+"mlflow.tracing.export.genai_semconv".msg = "Private MLflow API. Route it through src/revenium_mlflow/_compat.py, the one sanctioned boundary (VER-08). Drive the translation via MLFLOW_ENABLE_OTEL_GENAI_SEMCONV instead."
+
+[tool.ruff.lint.per-file-ignores]
+# Exactly two exemptions, and both are load-bearing. Adding a third is how this
+# wall stops meaning anything, so the count itself is asserted by plan 01-03's
+# acceptance criteria and any widening shows up as a diff on this table.
+#
+# The compat module is the single sanctioned boundary to MLflow internals
+# (CFG-12). At the mlflow>=3.15.0,<4 floor it needs no private access at all and
+# the AST wall test asserts that it has none (D-09) — so this exemption is
+# currently unused, and deliberately so. It is here to make the first genuine
+# breach a one-line, reviewable edit to one file rather than a scramble.
+"src/revenium_mlflow/_compat.py" = ["SLF", "TID"]
+# Test code may use private APIs freely. VER-08 bans private access in the
+# *shipped package*; the scope distinction is recorded as OI-01. This phase's
+# own success criterion 2 depends on it, the control fixture above is nothing
+# but private access, and plan 01-06's import-purity check reads OpenTelemetry
+# internals on purpose.
+"tests/**" = ["SLF", "TID"]
 
 [tool.ruff.format]
 # The defaults, written down rather than inherited, so a future ruff release
