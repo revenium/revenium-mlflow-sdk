@@ -633,3 +633,41 @@ except ModuleNotFoundError:
 
 Recorded here because later plans in this phase parse configuration files and would otherwise fail
 only on the floor interpreter — the leg most likely to be exercised last.
+
+---
+
+## 7. Final plan-level verification
+
+Re-run once more against the finished tree, after `[tool.pytest.ini_options]` was added to
+`pyproject.toml` and the repository convention file set landed — so the evidence describes the state
+that actually shipped rather than an intermediate one. `dist/` was rebuilt first.
+
+```console
+### HEAD under test
+f9f7569
+
+### 1. both artifacts exist and both contain py.typed
+revenium_mlflow-0.1.0-py3-none-any.whl
+revenium_mlflow-0.1.0.tar.gz
+wheel py.typed:  1
+sdist py.typed:  1
+
+### 2. clean uv venv --python 3.10 install of the wheel imports and prints 0.1.0
+version: 0.1.0
+normalized names: ['0.1.0', '0.1.0', '0.1.0']
+py.typed installed: True
+
+### 3. editable install works from the working tree
+editable install exit: 0
+version: 0.1.0
+
+### 4. pytest passes with at least one test
+.....                                                                    [100%]
+5 passed in 0.00s
+
+### 5. transcript present
+     635 docs/verification/pkg-02-build-install.md
+```
+
+All five plan-level verification points pass. The commit named in the transcript is the parent of the
+commit that adds this section.
