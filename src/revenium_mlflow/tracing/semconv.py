@@ -96,10 +96,12 @@ __all__ = [
     "MESSAGE_FORMAT_PROVIDERS",
     "MODEL_PREFIX_PROVIDERS",
     "PROVIDER_SENTINEL",
+    "RESOURCE_PROVIDER_CLAIM",
     "SPAN_TYPE_TO_OPERATION",
     "MappedSpan",
     "infer_provider",
     "map_span",
+    "resource_claim_attributes",
 ]
 
 # --- The emit allowlist, one constant per key ------------------------------
@@ -283,6 +285,50 @@ MODEL_PREFIX_PROVIDERS: _Final[tuple[tuple[str, str], ...]] = (
     ("o3-", "openai"),
 )
 
+#: The value the SDK claims at **resource** level (D-15, SEM-02).
+#:
+#: Its only job is to satisfy ``GenAISemanticConventionMapper.canHandle``, which
+#: checks resource attributes before it looks at any span. Without a resource
+#: claim the decision rests on a span in the batch carrying a provider key, and
+#: on the MLflow OpenAI path none does — so the whole batch falls to
+#: ``GenericFallbackMapper`` and rates under ``"Unknown"`` with no error on
+#: either side. Real per-provider attribution still comes from each span's own
+#: ``gen_ai.provider.name``, which is where the backend reads it for rating
+#: anyway; this claim decides *which mapper* reads it, not *what it says*.
+#:
+#: **The value is deliberately not a real provider name.** It is emitted from
+#: every process using the SDK, so it must assert nothing true-sounding and false
+#: about that process. D-15 rejected the two alternatives for the same reason:
+#: first-eligible-span-wins is nondeterministic under concurrency and actively
+#: mislabels a process calling two providers by whichever span arrived first, and
+#: a configured resource claim silently mislabels every payload from a process
+#: nobody configured.
+#:
+#: **Non-collision, checked rather than assumed.** ``canHandle`` returns ``false``
+#: outright when ``service.name`` or the scope name is in ``KNOWN_CUSTOM_SDK_NAMES``
+#: (``claude-code``, ``gemini-cli``, ``codex_exec``, ``codex_cli_rs``).
+#: ``BACKEND-CONTRACT.md`` §4 left "verify MLflow's resource does not collide" as
+#: an open item; it is closed — a captured MLflow resource carries
+#: ``telemetry.sdk.{language,name,version}`` and **no** ``service.name`` at all,
+#: and its scope name is ``mlflow.tracing.provider``. Neither collides, and this
+#: literal does not either. ``tests/unit/test_semconv_provider.py`` pins that
+#: against its own literal copy of the set.
+#:
+#: This phase produces the claim **set**. Merging it into an OTel ``Resource`` is
+#: an exporter concern and belongs to Phase 4 — the boundary ``02-CONTEXT.md``
+#: draws explicitly.
+RESOURCE_PROVIDER_CLAIM: _Final[str] = "revenium-mlflow-sdk"
+
+#: Built once. Handing the same read-only mapping to every caller is what makes
+#: :func:`resource_claim_attributes` deterministic by construction rather than by
+#: convention.
+_RESOURCE_CLAIM_ATTRIBUTES: _Final[_Mapping[str, str]] = _types.MappingProxyType(
+    {
+        GEN_AI_PROVIDER_NAME: RESOURCE_PROVIDER_CLAIM,
+        GEN_AI_SYSTEM: RESOURCE_PROVIDER_CLAIM,
+    }
+)
+
 #: The MLflow usage field to emit each token key from. One tuple rather than four
 #: hand-written lookups, so a key cannot be read from the wrong field.
 _TOKEN_FIELD_TO_KEY: _Final[tuple[tuple[str, str], ...]] = (
@@ -354,6 +400,24 @@ def _token_int(value: object, /) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int):
         return None
     return value
+
+
+def resource_claim_attributes() -> _Mapping[str, str]:
+    """The resource-level attributes the Phase 4 exporter merges (SEM-02).
+
+    Returns:
+        A read-only two-key mapping, both keys carrying
+        :data:`RESOURCE_PROVIDER_CLAIM`. Both spellings for the same D-16 reason
+        they appear per span: a duplicate *string* key carries no summing risk,
+        so the compatibility spelling costs nothing.
+
+    **It takes no arguments and consults no span, deliberately.** The claim is a
+    fact about the SDK, not about the traffic, so it is the same in a process
+    calling one provider and in a process calling four. Deriving it from a span
+    would reintroduce exactly what D-15 rejected — see
+    :data:`RESOURCE_PROVIDER_CLAIM` for why both alternatives are worse.
+    """
+    return _RESOURCE_CLAIM_ATTRIBUTES
 
 
 def _model_name(attributes: _Mapping[str, object], /) -> str | None:

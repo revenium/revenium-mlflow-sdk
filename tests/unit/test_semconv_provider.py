@@ -55,9 +55,12 @@ from opentelemetry.sdk.trace import ReadableSpan
 
 from revenium_mlflow.tracing.semconv import (
     PROVIDER_SENTINEL,
+    RESOURCE_PROVIDER_CLAIM,
     infer_provider,
+    map_span,
+    resource_claim_attributes,
 )
-from tests.fixtures.spans import build_readable_span
+from tests.fixtures.spans import build_readable_span, openai_autolog_shaped_span
 
 pytestmark = pytest.mark.unit
 
@@ -79,6 +82,13 @@ _FRAMEWORK_FORMATS = (
     "smolagents",
     "pydantic_ai",
 )
+
+#: The set the backend's ``GenAISemanticConventionMapper.canHandle`` rejects on,
+#: checked against both ``service.name`` and the instrumentation scope name.
+#: Spelled here as a literal rather than imported from anywhere, so a change on
+#: the backend side surfaces as a deliberate edit to this file instead of being
+#: silently agreed with. Cited from ``.planning/research/BACKEND-CONTRACT.md:133``.
+_KNOWN_CUSTOM_SDK_NAMES = frozenset({"claude-code", "gemini-cli", "codex_exec", "codex_cli_rs"})
 
 
 def _provider_span(
@@ -300,3 +310,169 @@ def test_both_google_signals_infer_the_same_literal() -> None:
 
     assert from_format == "google"
     assert from_model == "google"
+
+
+# --- Criterion 4: the OpenAI-autolog-shaped span -----------------------------
+
+
+def test_the_criterion_four_fixture_carries_no_mlflow_provider_attribute() -> None:
+    """The fixture must not drift into proving something easier.
+
+    MLflow's OpenAI autolog never writes ``mlflow.llm.provider`` — established
+    positively by enumerating what that path *does* write, not by a grep that
+    found nothing. If this attribute ever appeared on the fixture, the inference
+    assertion below would pass through step 1 and prove nothing about step 3,
+    which is the step SEM-02 exists for.
+    """
+    span = openai_autolog_shaped_span()
+
+    assert "mlflow.llm.provider" not in (span.attributes or {})
+
+
+def test_the_criterion_four_fixture_carries_what_the_openai_path_writes() -> None:
+    """Positively established, not assumed: four attributes, and exactly four.
+
+    ``mlflow/openai/autolog.py`` sets ``mlflow.message.format`` and
+    ``mlflow.chat.tokenUsage`` directly; the model arrives through
+    ``set_span_chat_attributes``, which writes one key and never
+    ``SpanAttributeKey.MODEL_PROVIDER``.
+    """
+    span = openai_autolog_shaped_span()
+
+    assert set(span.attributes or {}) == {
+        "mlflow.spanType",
+        "mlflow.llm.model",
+        "mlflow.chat.tokenUsage",
+        "mlflow.message.format",
+    }
+
+
+def test_an_openai_autolog_shaped_span_infers_openai() -> None:
+    """SEM-01 criterion 4, and the headline assertion of this plan.
+
+    Without step 3 this span reaches Revenium with the sentinel — or, before
+    D-13, with no provider key at all, in which case
+    ``GenAISemanticConventionMapper.canHandle`` declines it and
+    ``GenericFallbackMapper`` rates the whole batch under ``"Unknown"`` with no
+    error on either side.
+    """
+    assert infer_provider(openai_autolog_shaped_span()) == "openai"
+
+
+def test_the_mapped_openai_span_carries_openai_rather_than_the_sentinel() -> None:
+    """The same claim one layer out: what ``map_span`` actually puts on the wire.
+
+    Inference could be right while the emission site read a stale local.
+    """
+    attributes = map_span(openai_autolog_shaped_span()).attributes
+
+    assert attributes["gen_ai.provider.name"] == "openai"
+
+
+# --- D-16: one value, both spellings -----------------------------------------
+
+
+def test_a_mapped_span_carries_both_provider_spellings() -> None:
+    """Both keys present. The older spelling is what an unverified backend build
+    may still be reading, and dropping it as redundant is a change nobody could
+    detect from the client side.
+    """
+    attributes = map_span(openai_autolog_shaped_span()).attributes
+
+    assert {"gen_ai.provider.name", "gen_ai.system"} <= set(attributes)
+
+
+def test_both_provider_spellings_carry_the_same_value() -> None:
+    """Two spellings of one fact, not two facts.
+
+    If these could diverge, the backend would have two answers to "who provided
+    this" and no rule for choosing between them.
+    """
+    attributes = map_span(openai_autolog_shaped_span()).attributes
+
+    assert attributes["gen_ai.provider.name"] == attributes["gen_ai.system"]
+
+
+# --- SEM-02: the resource claim set ------------------------------------------
+
+
+def test_the_resource_claim_has_exactly_the_two_provider_keys() -> None:
+    """These two keys are what ``canHandle`` checks the resource for.
+
+    Any other key is inert there, and a missing one is the whole payload
+    dropping to the generic fallback.
+    """
+    assert sorted(resource_claim_attributes()) == ["gen_ai.provider.name", "gen_ai.system"]
+
+
+def test_both_resource_claim_keys_carry_the_claim_literal() -> None:
+    """Same D-16 reason as the per-span pair: one value, both spellings."""
+    assert set(resource_claim_attributes().values()) == {"revenium-mlflow-sdk"}
+
+
+def test_the_resource_claim_takes_no_span_and_is_deterministic() -> None:
+    """Two calls, equal mappings — the claim is not order- or concurrency-dependent.
+
+    D-15 rejected first-eligible-span-wins for exactly this: it is
+    nondeterministic under concurrency and it actively mislabels a process
+    calling two providers by whichever span happened to arrive first.
+    """
+    assert resource_claim_attributes() == resource_claim_attributes()
+
+
+def test_the_resource_claim_is_the_recorded_literal() -> None:
+    """Costly to reverse (D-15): once emitted, this is what the backend indexed.
+
+    Changing it risks a window in which payloads are claimed by a different
+    mapper than the one that claimed the earlier ones.
+    """
+    assert RESOURCE_PROVIDER_CLAIM == "revenium-mlflow-sdk"
+
+
+def test_the_sentinel_is_the_recorded_literal() -> None:
+    """Costly to reverse (D-13): changing it splits one customer's
+    unknown-provider history across two labels, an undo that touches stored data
+    rather than code.
+    """
+    assert PROVIDER_SENTINEL == "revenium-unknown-provider"
+
+
+def test_the_resource_claim_differs_from_the_per_span_sentinel() -> None:
+    """Two distinct literals, deliberately (D-C2).
+
+    It is what lets a Phase 6 diagnostic tell "we could not infer this span's
+    provider" apart from "the resource claim is doing its job". Collapsing them
+    would make those two states indistinguishable in the field.
+    """
+    assert RESOURCE_PROVIDER_CLAIM != PROVIDER_SENTINEL
+
+
+def test_the_resource_claim_is_not_a_rejected_sdk_name() -> None:
+    """A collision here silently routes every payload to the generic fallback.
+
+    ``canHandle`` returns ``false`` before it ever looks at the provider keys if
+    the resource's ``service.name`` or the scope name is in this set.
+    """
+    assert RESOURCE_PROVIDER_CLAIM not in _KNOWN_CUSTOM_SDK_NAMES
+
+
+def test_the_sentinel_is_not_a_rejected_sdk_name() -> None:
+    """Same check on the other literal, for the same reason.
+
+    The sentinel is a span attribute rather than a resource attribute today, but
+    both literals are SDK-owned names the backend may come to match on, and the
+    cost of the extra assertion is one line.
+    """
+    assert PROVIDER_SENTINEL not in _KNOWN_CUSTOM_SDK_NAMES
+
+
+def test_neither_literal_lowercases_to_the_generic_fallback_provider_id() -> None:
+    """``GenericFallbackMapper`` rates under provider id ``"Unknown"``.
+
+    A sentinel that case-folds into that bucket would merge the SDK's visible,
+    correctable unknown with the silent fallback it exists to stay out of —
+    partly defeating D-13. Assumption A3 (whether the backend matches provider
+    ids case-sensitively) is unverifiable without calling production, so the
+    literals avoid the question rather than answer it.
+    """
+    assert {PROVIDER_SENTINEL.lower(), RESOURCE_PROVIDER_CLAIM.lower()}.isdisjoint({"unknown"})
