@@ -659,11 +659,33 @@ def _bounded(value: str | None, /) -> str | None:
     length and by nothing else, and the residual that leaves is T-02-08-07, named
     in plan 02-08's threat register rather than papered over.
 
-    It is applied to a cleaned finish reason too, so the cap holds on every
-    emitted string without exception even where a closed set already constrains
-    it. That is redundant today — no member of :data:`_KNOWN_FINISH_REASONS` is
-    close to the cap — and it is kept so "no emitted value exceeds the cap" is
-    true by construction rather than by the current contents of a set.
+    It is applied to a cleaned finish reason too, even where a closed set
+    already constrains it. That is redundant today — no member of
+    :data:`_KNOWN_FINISH_REASONS` is close to the cap — and it is kept so the
+    guarantee holds by construction rather than by the current contents of a
+    set.
+
+    **Which emitted keys this covers, and which it does not.** The predecessor
+    of this paragraph claimed the cap held on every emitted string with no
+    exceptions. Three emitted strings were exceptions, and the claim is what let
+    that survive review (CR-01). So the perimeter is enumerated instead:
+
+    *Covered.* ``gen_ai.request.model``, ``gen_ai.response.model``,
+    ``gen_ai.response.id``, ``gen_ai.operation.name``,
+    ``gen_ai.response.finish_reasons`` per element, and — as of CR-01 —
+    ``gen_ai.provider.name`` and ``gen_ai.system``. The provider pair differs
+    from the rest in what rejection means: a rejected value is replaced by
+    :data:`PROVIDER_SENTINEL` rather than omitting the key, because the provider
+    key is never permitted to be absent. See the emission site in
+    :func:`map_span` for why.
+
+    *Not covered.* ``error.type`` forwards ``exception.type`` off the span
+    verbatim and unbounded — tracked as CR-02 at
+    ``.planning/todos/pending/cr-02-error-type-unconstrained.md``, out of scope
+    here rather than covered here. ``deployment.environment.name`` and
+    ``cloud.region`` arrive as :func:`map_span` keyword arguments from SDK
+    configuration rather than off a span, so they cross a different trust
+    boundary and are not this function's subject at all.
 
     **One consequence worth stating, because it is not an emit rule.**
     :func:`_model_candidates` reads :func:`_mapping_model`, so an over-cap model
@@ -875,6 +897,14 @@ def infer_provider(span: _ReadableSpan, /) -> str:
         A non-empty provider name. This function has no ``raise`` path: it runs
         inside a ``SpanProcessor`` callback for every span in the host process,
         and raising there would fail an export batch over one malformed span.
+
+        **The returned value is unbounded**, and this function is public, so a
+        direct caller has to be told so here. Steps 1 and 2 forward a string off
+        the span that an application or a bridged instrumentor wrote, at
+        whatever length it wrote it; only steps 3 to 5 return a value from a
+        closed vocabulary. :func:`map_span` is what applies
+        :data:`_MAX_EMITTED_VALUE_CHARS`, at the emit site, substituting
+        :data:`PROVIDER_SENTINEL` for an over-cap value (CR-01).
 
     The order is the whole design, so it is written out rather than left to be
     read off the body:
@@ -1153,7 +1183,36 @@ def map_span(
     # *numeric* keys risk a backend that sums rather than dedupes. The deployed
     # backend build is still unverified, which is why the compatibility spelling
     # is carried at all rather than dropped as redundant.
-    provider = infer_provider(span)
+    #
+    # CR-01: the inferred value is bounded here, at the one place it reaches the
+    # wire, because steps 1 and 2 of the chain forward a string written by code
+    # this SDK does not control — an application's ``mlflow.llm.provider`` or a
+    # bridged instrumentor's own key. Reproduced at 264 code points carrying a
+    # credential on an admitted span. A value that long is not a provider name;
+    # it is an unbounded blob that happened to be sitting in a provider-shaped
+    # attribute, so it takes the answer step 5 already declares for "no provider
+    # I can name".
+    #
+    # Rejecting it by *omitting* the keys was considered and refused. That would
+    # emit an eligible, billable span carrying no provider at all, which the
+    # backend's ``GenAISemanticConventionMapper`` declines and
+    # ``GenericFallbackMapper`` then rates under provider id "Unknown" with no
+    # error raised on either side — a billing event with no attributable cause,
+    # which is the outcome step 5 exists to prevent. Substitution keeps the
+    # never-empty guarantee (D-13, SEM-01) intact under a rejection.
+    #
+    # The fallback survives the cap it was just subjected to: the sentinel is
+    # twenty-five code points against a cap of sixty-four, so this cannot
+    # reject its own replacement. That arithmetic is pinned as a standing
+    # assertion in ``tests/unit/test_semconv_provider.py`` rather than left to
+    # inspection.
+    #
+    # The cap is applied here and not inside :func:`infer_provider` deliberately.
+    # Bounding it there would make an over-cap step-1 or step-2 value fall
+    # *through* to steps 3 and 4, where it could resolve to a different provider
+    # label than the sentinel — a change to the precedence ladder, made in the
+    # name of a length fix.
+    provider = _bounded(infer_provider(span)) or PROVIDER_SENTINEL
     attributes[GEN_AI_PROVIDER_NAME] = provider
     attributes[GEN_AI_SYSTEM] = provider
 
