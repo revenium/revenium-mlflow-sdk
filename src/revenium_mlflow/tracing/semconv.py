@@ -674,12 +674,14 @@ def operation_for_span(attributes: _Mapping[str, object], /) -> str | None:
 
     Returns:
         The operation, or ``None`` when neither signal names one. A declared
-        operation is returned **unchanged, including the empty string** — see
-        below.
+        operation is returned as the shared decoder reads it — bare, never
+        carrying the JSON quotes MLflow's serializer would have added.
 
     **The rule, in this order and no other (UD-1, GAP-1).**
 
-    1. ``gen_ai.operation.name``, when the span carries it as a ``str``.
+    1. ``gen_ai.operation.name``, decoded through the shared reader, when the
+       decoded value is a ``str``. An empty or non-string value is absent — see
+       below.
     2. Otherwise ``mlflow.spanType``, decoded through the shared reader, when the
        decoded value is a key of :data:`SPAN_TYPE_TO_OPERATION`.
     3. Otherwise ``None``.
@@ -705,22 +707,27 @@ def operation_for_span(attributes: _Mapping[str, object], /) -> str | None:
     already runs — ``semconv`` imports nothing from ``eligibility``, and inverting
     that would create a cycle.
 
-    **No truthiness guard on step 1, and that is load-bearing.**
-    ``classify_span`` enters its declared-operation branch on ``isinstance`` alone,
-    so ``gen_ai.operation.name = ""`` rejects the span today rather than falling
-    through to the span type. Returning the empty string unchanged preserves that
-    verdict exactly; a truthiness guard here would silently widen admission, which
-    is the one direction a one-way-door billing predicate must not move by
-    accident. This read is a candidate for the shared ``_spanattrs`` decoder in
-    plan 02-07, whose checkpoint decides it — so if the empty-string case changes,
-    it changes as that recorded decision and not as a quiet edit here.
+    **Step 1 reads through the shared decoder, and the empty declared operation
+    therefore falls through (plan 02-07).** This read was raw until plan 02-07's
+    ``checkpoint:decision`` — ``gate="blocking-human"`` — was answered
+    ``decode-everywhere``. Two consequences follow and both were accepted on the
+    record. A JSON-encoded operation now resolves to its bare value, so
+    ``'"chat"'`` is admitted as ``chat`` and no longer reaches the wire carrying
+    literal quotes. And ``gen_ai.operation.name = ""`` is reported absent by
+    :func:`_spanattrs.decode`'s truthiness guard, so it stops rejecting the span
+    and falls through to ``mlflow.spanType`` — the empty declared operation is no
+    longer a rejection trigger. That widens admission, which is the direction a
+    one-way-door billing predicate must not move by accident; it moved
+    deliberately here, and every span shape whose verdict moved with it is pinned
+    by name in ``tests/unit/test_operation_precedence.py``'s ``_VERDICT_CHANGES``
+    and in :func:`_spanattrs.decode_int`'s docstring.
 
     Comparison at step 2 is exact over the decoded string: no case folding, no
     whitespace stripping, no Unicode normalization, matching
     :func:`eligibility.classify_span`'s own equality rule.
     """
-    declared = attributes.get(GEN_AI_OPERATION_NAME)
-    if isinstance(declared, str):
+    declared = _spanattrs.decode_str(attributes, GEN_AI_OPERATION_NAME)
+    if declared is not None:
         return declared
     span_type = _spanattrs.decode_str(attributes, _spanattrs.MLFLOW_SPAN_TYPE)
     if span_type is not None and span_type in SPAN_TYPE_TO_OPERATION:
@@ -734,13 +741,15 @@ def _operation(attributes: _Mapping[str, object], /) -> str | None:
     The resolution is not repeated here — there is exactly one precedence rule in
     this package and it lives in :func:`operation_for_span`.
 
-    The single deliberate difference between this caller and the gate: an empty
-    declared operation is reported as ``None`` so :func:`map_span` omits the key
-    entirely. T-02-08 forbids a present key carrying no value — the OTLP encoder
-    ships an ``AnyValue`` with no field set and the backend reads that as an
-    answer rather than as an absence. The gate keeps the empty string because
-    there it is a rejection; here it is nothing to say. Read this as the one
-    documented asymmetry, not as drift.
+    The remaining truthiness guard is now belt and braces rather than the
+    asymmetry it once was. Plan 02-07 routed step 1 of the resolver through the
+    shared decoder, whose own guard already reports an empty attribute as absent,
+    so the resolver no longer hands back an empty string for this line to catch.
+    It stays because what it enforces is a rule about the *wire*: T-02-08 forbids
+    a present key carrying no value — the OTLP encoder ships an ``AnyValue`` with
+    no field set and the backend reads that as an answer rather than as an
+    absence — and a guard on the emitted value should not depend on a guard two
+    functions away for its correctness.
     """
     return operation_for_span(attributes) or None
 
@@ -820,11 +829,17 @@ def map_span(
     # be summed, so it costs nothing; a duplicate *numeric* key can be, so it
     # costs the customer money. Same evidence, opposite answers, because the
     # failure modes are not symmetric.
+    #
+    # The flat fallback reads through ``_spanattrs.decode_int`` (plan 02-07), so
+    # a count MLflow serialized to ``"10"`` is the same number here that it is at
+    # the gate. ``_token_int`` still wraps it: the emit policy — zero is
+    # forwarded, ``bool`` never is — belongs in one place, and plan 02-08's
+    # negative-count rule has to land somewhere that both sources pass through.
     usage = _spanattrs.decode_mapping(source, _spanattrs.MLFLOW_CHAT_USAGE) or {}
     for field, key in _TOKEN_FIELD_TO_KEY:
         count = _token_int(usage.get(field))
         if count is None:
-            count = _token_int(source.get(key))
+            count = _token_int(_spanattrs.decode_int(source, key))
         if count is not None:
             attributes[key] = count
 

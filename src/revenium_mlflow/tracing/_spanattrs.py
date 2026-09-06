@@ -52,6 +52,7 @@ __all__ = [
     "MLFLOW_SPAN_OUTPUTS",
     "MLFLOW_SPAN_TYPE",
     "decode",
+    "decode_int",
     "decode_mapping",
     "decode_str",
     "is_positive_int",
@@ -143,6 +144,59 @@ def decode_str(attributes: _Mapping[str, object], key: str, /) -> str | None:
     """
     decoded = decode(attributes, key)
     return decoded if isinstance(decoded, str) else None
+
+
+def decode_int(attributes: _Mapping[str, object], key: str, /) -> int | None:
+    """:func:`decode`, narrowed to a non-``bool`` integer.
+
+    ``bool`` is excluded **before** ``int`` is accepted, and the order is the
+    whole point: ``isinstance(True, int)`` is ``True`` in Python and the OTLP
+    protobuf encoder ships such a value as ``bool_value: true``. A boolean
+    reaching a billed token count would violate SEM-04 behind a green
+    ``isinstance`` assertion, and the backend has no way to tell it from a real
+    count (T-02-07-04).
+
+    A negative value is returned rather than dropped. This helper reports what
+    was recorded; what to do about a count nobody could have measured is a policy
+    its callers hold, and it lands in plan 02-08 in one place rather than in
+    every reader.
+
+    **The decision this function exists to carry out (plan 02-07,
+    ``checkpoint:decision``, ``gate="blocking-human"``, answered
+    ``decode-everywhere``).** All three remaining raw ``gen_ai.*`` reads — the
+    token-evidence gate in ``eligibility._has_token_evidence``, the operation
+    read in ``semconv.operation_for_span``, and the flat token fallback in
+    ``semconv.map_span`` — now go through this module. Two of the three are on
+    the **gate**, so this widens what is admitted into billing. That was accepted
+    deliberately, on the record, before anything shipped, and these are the five
+    span shapes whose verdict moved:
+
+    1. ``gen_ai.operation.name`` JSON-encoded as a billable operation
+       (``'"chat"'``) with token evidence: ``WRONG_TYPE`` becomes ``ADMITTED``.
+    2. ``gen_ai.operation.name = ""`` on a span whose ``mlflow.spanType`` is
+       billable: ``WRONG_TYPE`` becomes ``ADMITTED``. An empty declared operation
+       stops being a rejection trigger — :func:`decode`'s truthiness guard
+       reports it absent — and the span falls through to its MLflow span type.
+    3. ``gen_ai.operation.name`` holding valid JSON that is not a JSON string
+       (``"123"``, ``"true"``, ``"[1]"``) on a span whose ``mlflow.spanType`` is
+       billable: ``WRONG_TYPE`` becomes ``ADMITTED``, by the same fall-through.
+    4. ``gen_ai.usage.<count>`` JSON-encoded as a number (``"10"``):
+       ``NO_TOKEN_EVIDENCE`` becomes ``ADMITTED``.
+    5. ``gen_ai.operation.name`` JSON-encoded as a billable operation with **no**
+       token evidence: ``WRONG_TYPE`` becomes ``NO_TOKEN_EVIDENCE``. The span
+       stays rejected; only its reason code moves, and D-10 exists because that
+       code is the one number a mis-tuned gate is visible in.
+
+    Every one of those five is pinned by name in
+    ``tests/unit/test_operation_precedence.py``'s ``_VERDICT_CHANGES``, and the
+    four near-neighbour shapes that must **not** move are pinned in
+    ``_VERDICT_UNCHANGED``. A sixth shape changing verdict reds that test rather
+    than moving silently.
+    """
+    decoded = decode(attributes, key)
+    if isinstance(decoded, bool) or not isinstance(decoded, int):
+        return None
+    return decoded
 
 
 def decode_mapping(attributes: _Mapping[str, object], key: str, /) -> _Mapping[str, object] | None:

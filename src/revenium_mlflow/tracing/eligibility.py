@@ -214,13 +214,24 @@ def _has_token_evidence(attributes: _Mapping[str, object], /) -> bool:
     different admission rules would need explaining forever, and the gate is the
     second line of defence against a ``CHAT_MODEL``-typed orchestration wrapper
     that the type allowlist alone would wave through.
+
+    **Both spellings go through the shared decoder (plan 02-07).** The flat
+    ``gen_ai.usage.*`` attributes were read raw here while the ``mlflow.*`` usage
+    mapping was decoded, so a count MLflow had serialized to ``"10"`` was
+    evidence on one path and nothing on the other — the span was silently not
+    billed. ``decode`` plus :func:`_spanattrs.is_positive_int` rather than
+    ``decode_int`` on purpose: the positivity rule stays in exactly one place and
+    is not restated at this call site.
     """
     usage = _spanattrs.decode_mapping(attributes, _spanattrs.MLFLOW_CHAT_USAGE)
     if usage is not None and any(
         _spanattrs.is_positive_int(usage.get(field)) for field in _MLFLOW_TOKEN_FIELDS
     ):
         return True
-    return any(_spanattrs.is_positive_int(attributes.get(key)) for key in _GENAI_TOKEN_ATTRIBUTES)
+    return any(
+        _spanattrs.is_positive_int(_spanattrs.decode(attributes, key))
+        for key in _GENAI_TOKEN_ATTRIBUTES
+    )
 
 
 def _token_verdict(attributes: _Mapping[str, object], /) -> EligibilityReason:
