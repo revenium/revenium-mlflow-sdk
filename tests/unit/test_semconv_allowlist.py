@@ -84,6 +84,23 @@ absence assertion over these could only ever be made green by deleting the
 plant. :data:`_FORWARDED_IDENTIFIERS` is asserted **present** on them by
 :func:`test_the_model_and_id_keys_forward_the_providers_own_string` instead. The
 perimeter is a written decision, not whatever the sweep happened to cover.
+
+*Class B with a fallback — the provider pair.* ``gen_ai.provider.name`` and
+``gen_ai.system`` were classified nowhere, and that omission is what let them
+ship emitted unbounded (CR-01, reproduced at 264 code points carrying a
+credential). They are Class B: bounded by length, and by nothing else, because
+an allowlist there would drop every provider this SDK has not heard of. They
+differ from the four keys above in what a rejection does — an over-cap value is
+replaced by ``PROVIDER_SENTINEL`` rather than omitting the key, because the
+provider key is never permitted to be absent (D-13, SEM-01).
+
+They are deliberately **not** added to the :data:`_FORBIDDEN_CONTENT` sweep. A
+sub-cap provider string is forwarded verbatim by design — that is the same shape
+as the accepted T-02-08-07 residual — so an absence assertion over them could
+only ever be made green by deleting the plant, exactly as for the four
+identifier keys. Their boundary is pinned in
+``tests/unit/test_semconv_provider.py`` instead, from both sides and on both
+source paths.
 """
 
 import inspect

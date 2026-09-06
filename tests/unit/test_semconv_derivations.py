@@ -479,6 +479,16 @@ def _declared_operation_span(value: str) -> ReadableSpan:
 #: Every Class B key, paired with a span factory that makes the named field the
 #: *only* source for it. ``gen_ai.response.id`` has its own test above, which
 #: additionally asserts the at-cap value is emitted whole rather than shortened.
+#:
+#: ``gen_ai.provider.name`` and ``gen_ai.system`` are Class B too and are
+#: deliberately not rows here — the enumeration is short by two on purpose, not
+#: by oversight. The parametrized assertion below requires the key to be
+#: *absent* over the cap; the provider contract requires it to be *present*
+#: carrying ``PROVIDER_SENTINEL``, because a billable span with no provider is
+#: what the backend rates under "Unknown" (D-13, SEM-01, D-CR01). A provider row
+#: here could only be made green by changing that contract. Their boundary is
+#: pinned in ``tests/unit/test_semconv_provider.py``, from both sides and on
+#: both source paths.
 _CLASS_B_CASES: tuple[tuple[str, Callable[[str], ReadableSpan]], ...] = (
     ("gen_ai.request.model", _inputs_model_span),
     ("gen_ai.response.model", _outputs_model_span),
