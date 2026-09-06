@@ -28,6 +28,14 @@ The drifts this file exists to catch, each named so a red run is attributable:
 5. **Either costly-to-reverse literal changing.** Both are pinned against their
    recorded value here, because once traffic has landed they are what the
    backend has indexed.
+6. **An emitted provider value outgrowing the cap.** Steps 1 and 2 forward a
+   string written by code this SDK does not control, so the value's length is
+   the application's to choose. Emitted unbounded, it is a billing attribute
+   that carries whatever the customer happened to put in a provider-shaped
+   field — reproduced in ``02-REVIEW.md`` at 264 code points carrying a
+   credential (CR-01). The boundary pair below fails whichever way the cap
+   breaks: absent, and the over-cap value goes to the wire; blanket, and the
+   at-cap value that should survive does not.
 
 **Every expected provider value below is spelled as a literal.** Importing
 ``MESSAGE_FORMAT_PROVIDERS`` and asserting the chain against it would produce a
@@ -49,10 +57,12 @@ carries both halves so that changing one step and not the other fails here.
 """
 
 import json
+from collections.abc import Callable
 
 import pytest
 from opentelemetry.sdk.trace import ReadableSpan
 
+from revenium_mlflow.tracing.eligibility import EligibilityReason, classify_span
 from revenium_mlflow.tracing.semconv import (
     PROVIDER_SENTINEL,
     RESOURCE_PROVIDER_CLAIM,
@@ -89,6 +99,25 @@ _FRAMEWORK_FORMATS = (
 #: the backend side surfaces as a deliberate edit to this file instead of being
 #: silently agreed with. Cited from ``.planning/research/BACKEND-CONTRACT.md:133``.
 _KNOWN_CUSTOM_SDK_NAMES = frozenset({"claude-code", "gemini-cli", "codex_exec", "codex_cli_rs"})
+
+#: The character cap this file expects, held as a literal rather than imported
+#: from the module under test — the independent-copy rule again, and
+#: ``test_semconv_derivations.py`` records the same figure the same way. It is
+#: used to *build* the boundary values below, so moving the module's cap in
+#: either direction reds the pair: raise it and the 65-code-point value stops
+#: becoming the sentinel, lower it and the 64-code-point value stops surviving.
+_MAX_EMITTED_VALUE_CHARS = 64
+
+#: The CR-01 reproduction, transcribed from ``02-REVIEW.md`` so the tests below
+#: run against the recorded evidence rather than a paraphrase of it. The
+#: credential is synthetic and always was — no live key appears in this file,
+#: and nothing here is read from an environment variable.
+_CREDENTIAL_MARKER = "rev_sk_SUPERSECRET_KEY"
+_CREDENTIAL_URL = f"https://user:{_CREDENTIAL_MARKER}@api.internal.example.com/v1 "
+
+#: Padded to the 264 code points the review recorded, with the repeated
+#: character it recorded, so the length in the transcript is the length here.
+_CREDENTIAL_PROVIDER = _CREDENTIAL_URL + "A" * (264 - len(_CREDENTIAL_URL))
 
 
 def _provider_span(
@@ -448,6 +477,176 @@ def test_both_provider_spellings_carry_the_same_value() -> None:
     attributes = map_span(openai_autolog_shaped_span()).attributes
 
     assert attributes["gen_ai.provider.name"] == attributes["gen_ai.system"]
+
+
+# --- CR-01: the emitted provider value is bounded ----------------------------
+
+
+def _step_one_provider_span(provider: str) -> ReadableSpan:
+    """An ADMITTED span whose only provider signal is MLflow's own assertion.
+
+    ``mlflow.llm.provider`` is ``json.dumps``-ed because that is the shape
+    MLflow's serializer puts on the wire, and ``gen_ai.usage.input_tokens``
+    carries the token evidence :func:`classify_span` requires — without it the
+    span is dropped before ``map_span`` is reached and an assertion about what
+    ``map_span`` emits would be an assertion about a span nothing rates.
+    """
+    return build_readable_span(
+        attributes={
+            "mlflow.spanType": json.dumps("CHAT_MODEL"),
+            "mlflow.llm.provider": json.dumps(provider),
+            "gen_ai.usage.input_tokens": 5,
+        },
+        start_time_ns=_START_NS,
+        end_time_ns=_END_NS,
+    )
+
+
+def _step_two_provider_span(provider: str) -> ReadableSpan:
+    """The same span through step 2: a bridged instrumentor's own assertion.
+
+    Bare rather than JSON-encoded — a non-MLflow OTel instrumentor writes a real
+    OpenTelemetry attribute. The review reproduced the leak on this path too, at
+    500 code points, so a cap applied to one source path and not the other would
+    read here as a working fix.
+    """
+    return build_readable_span(
+        attributes={
+            "mlflow.spanType": json.dumps("CHAT_MODEL"),
+            "gen_ai.provider.name": provider,
+            "gen_ai.usage.input_tokens": 5,
+        },
+        start_time_ns=_START_NS,
+        end_time_ns=_END_NS,
+    )
+
+
+def _admitted_span_with_no_provider_signal() -> ReadableSpan:
+    """An ADMITTED span carrying no provider signal at any of the five steps."""
+    return build_readable_span(
+        attributes={
+            "mlflow.spanType": json.dumps("CHAT_MODEL"),
+            "gen_ai.usage.input_tokens": 5,
+        },
+        start_time_ns=_START_NS,
+        end_time_ns=_END_NS,
+    )
+
+
+#: Both source paths a provider value can arrive on, so every boundary assertion
+#: below runs against each. One path bounded and the other not is the shape a
+#: single-factory test cannot tell apart from a working cap.
+_PROVIDER_SOURCE_PATHS = (
+    pytest.param(_step_one_provider_span, id="step1-mlflow-llm-provider"),
+    pytest.param(_step_two_provider_span, id="step2-gen-ai-provider-name"),
+)
+
+
+@pytest.mark.parametrize("factory", _PROVIDER_SOURCE_PATHS)
+def test_a_provider_at_the_cap_reaches_both_spellings_whole(
+    factory: Callable[[str], ReadableSpan],
+) -> None:
+    """The value that fits survives, entire, under both D-16 spellings.
+
+    This is the half that makes the pair a boundary rather than a blanket drop.
+    A cap asserted only from above is indistinguishable from rejecting every
+    provider name outright, and rejecting every provider name reads downstream
+    as one customer's whole history attributed to the sentinel — no error on
+    either side.
+    """
+    at_cap = "p" * _MAX_EMITTED_VALUE_CHARS
+
+    attributes = map_span(factory(at_cap)).attributes
+
+    assert (attributes["gen_ai.provider.name"], attributes["gen_ai.system"]) == (at_cap, at_cap)
+
+
+@pytest.mark.parametrize("factory", _PROVIDER_SOURCE_PATHS)
+def test_a_provider_one_character_over_the_cap_becomes_the_sentinel(
+    factory: Callable[[str], ReadableSpan],
+) -> None:
+    """One code point over, and both spellings carry step 5's answer instead.
+
+    This is the half that makes the pair a cap rather than no cap at all. An
+    over-cap string is not a provider name — it is an unbounded blob sitting in
+    a provider-shaped attribute — so it takes the answer the chain already
+    declares for "no provider I can name" (D-CR01).
+    """
+    over_cap = "p" * (_MAX_EMITTED_VALUE_CHARS + 1)
+
+    attributes = map_span(factory(over_cap)).attributes
+
+    assert (attributes["gen_ai.provider.name"], attributes["gen_ai.system"]) == (
+        PROVIDER_SENTINEL,
+        PROVIDER_SENTINEL,
+    )
+
+
+def test_an_over_cap_provider_leaves_both_provider_keys_present() -> None:
+    """Rejecting the value must not drop the key — D-13 / SEM-01, unconditionally.
+
+    Asserted separately from the value so that a future change from substitution
+    to omission reds here by name. Omission would emit an eligible, billable
+    span with no provider at all, which the backend's
+    ``GenAISemanticConventionMapper`` declines and ``GenericFallbackMapper``
+    rates under ``"Unknown"`` with no error on either side — the exact outcome
+    step 5 exists to prevent.
+    """
+    span = _step_one_provider_span("p" * (_MAX_EMITTED_VALUE_CHARS + 1))
+
+    assert {"gen_ai.provider.name", "gen_ai.system"} <= set(map_span(span).attributes)
+
+
+def test_the_credential_reproduction_is_admitted_and_carries_its_marker() -> None:
+    """The known-dirty precondition, without which the absence test below is empty.
+
+    Both halves are one precondition and are asserted together deliberately: a
+    clean absence result is exactly what a check inspecting nothing also
+    produces. This span has to be the thing the mapper reads *and* the thing the
+    gate admits, or the assertion in the next test is about a span nobody rates.
+    That is the discipline ``test_semconv_allowlist.py`` records, and the GAP-2
+    failure it was written after.
+    """
+    span = _step_one_provider_span(_CREDENTIAL_PROVIDER)
+    raw = span.attributes or {}
+
+    assert _CREDENTIAL_MARKER in str(raw["mlflow.llm.provider"])
+    assert classify_span(span) is EligibilityReason.ADMITTED
+
+
+def test_the_credential_marker_reaches_neither_emitted_provider_value() -> None:
+    """CR-01 itself: the 264-code-point reproduction no longer goes to the wire.
+
+    The leak was duplicated across both spellings, so both are swept. A test
+    over one key would pass while the other kept exporting the credential.
+    """
+    attributes = map_span(_step_one_provider_span(_CREDENTIAL_PROVIDER)).attributes
+    emitted = (attributes["gen_ai.provider.name"], attributes["gen_ai.system"])
+
+    assert not any(_CREDENTIAL_MARKER in str(value) for value in emitted)
+
+
+def test_the_sentinel_is_short_enough_to_survive_its_own_cap() -> None:
+    """The fallback cannot reject itself, asserted rather than left to inspection.
+
+    A sentinel longer than the cap would make the rejection path either recurse
+    or emit nothing — and it would fail on exactly the spans the cap fires on,
+    which are the ones no fixture in this repository has.
+    """
+    assert len(PROVIDER_SENTINEL) <= _MAX_EMITTED_VALUE_CHARS
+
+
+def test_an_over_cap_provider_emits_what_no_provider_signal_at_all_emits() -> None:
+    """One spelling of "unknown", not two, so the two paths cannot drift apart.
+
+    If the rejection path grew its own literal, one customer's spans would split
+    across two provider labels — each reading as correct forever, and neither
+    discoverable from the client side. This is drift 4 applied to the new path.
+    """
+    rejected = map_span(_step_one_provider_span("p" * (_MAX_EMITTED_VALUE_CHARS + 1))).attributes
+    absent = map_span(_admitted_span_with_no_provider_signal()).attributes
+
+    assert rejected["gen_ai.provider.name"] == absent["gen_ai.provider.name"]
 
 
 # --- SEM-02: the resource claim set ------------------------------------------
