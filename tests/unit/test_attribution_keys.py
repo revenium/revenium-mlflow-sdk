@@ -1,4 +1,4 @@
-"""ATTR-07: every one of the 21 keys reaches the span, asserted key by key.
+"""ATTR-07 and ATTR-08: all 21 keys reach the span, and ``middleware.source`` defaults.
 
 **Every call this module makes is built from ``REVENIUM_ATTRIBUTE_KEYS``, never
 typed out.** A test that hand-writes twenty keyword arguments passes while
@@ -31,6 +31,7 @@ import pytest
 
 from revenium_mlflow.attributes import (
     REVENIUM_ATTRIBUTE_KEYS,
+    REVENIUM_MIDDLEWARE_SOURCE,
     REVENIUM_PRODUCT_NAME,
     REVENIUM_REQUEST_STREAM,
     REVENIUM_RETRY_NUMBER,
@@ -227,3 +228,94 @@ def test_retry_number_and_request_stream_reach_the_span_in_their_declared_types(
     stream = stamped[REVENIUM_REQUEST_STREAM]
     assert isinstance(stream, bool)
     assert stream is _REQUEST_STREAM_VALUE
+
+
+def test_a_scope_supplying_one_parameter_stamps_that_key_and_no_other() -> None:
+    """The negative control: the other twenty do not arrive as empty values.
+
+    Without this, every assertion above would pass equally well against an
+    implementation that wrote all 21 keys always, filling the unsupplied ones
+    with ``""``. That implementation is worse than the drop it replaces: an empty
+    string is a value the backend stores, so it would overwrite nothing with
+    something and look like real attribution.
+
+    ``middleware.source`` is expected here because it is defaulted (ATTR-08); see
+    :func:`test_middleware_source_defaults_to_mlflow_when_the_caller_supplied_none`.
+    Two keys, and the count is asserted, so the default cannot drag the other
+    nineteen along with it.
+    """
+    tracer, exporter = build_collecting_tracer()
+    with attribution(subscriber_id="s-1"):
+        tracer.start_span("chat", attributes={"gen_ai.operation.name": "chat"}).end()
+
+    (collected,) = exporter.get_finished_spans()
+    stamped = revenium_attributes(collected)
+    assert stamped == {
+        REVENIUM_SUBSCRIBER_ID: "s-1",
+        REVENIUM_MIDDLEWARE_SOURCE: "mlflow",
+    }
+    assert len(stamped) == 2
+
+
+# --- ATTR-08: the middleware.source default --------------------------------
+
+
+def test_middleware_source_defaults_to_mlflow_when_the_caller_supplied_none() -> None:
+    """ATTR-08. The literal is written out here, once, deliberately.
+
+    Every other expectation in this module is derived. This one cannot be: the
+    *value* ``mlflow`` is the fact under test, and deriving it from the
+    implementation's own constant would make the assertion agree with whatever
+    the implementation happens to say.
+    """
+    tracer, exporter = build_collecting_tracer()
+    with attribution(subscriber_id="s-1"):
+        tracer.start_span("chat", attributes={"gen_ai.operation.name": "chat"}).end()
+
+    (collected,) = exporter.get_finished_spans()
+    assert revenium_attributes(collected)[REVENIUM_MIDDLEWARE_SOURCE] == "mlflow"
+
+
+def test_an_explicit_middleware_source_is_not_overwritten_by_the_default() -> None:
+    """A default that won over the caller would be a default nobody could turn off.
+
+    The value matters beyond configurability: ``revenium.middleware.source`` is
+    what tells Revenium which middleware produced a record, so a default that
+    overrode the caller would make every record emitted through a wrapping
+    integration claim to have come from this SDK.
+    """
+    tracer, exporter = build_collecting_tracer()
+    with attribution(subscriber_id="s-1", middleware_source="custom"):
+        tracer.start_span("chat", attributes={"gen_ai.operation.name": "chat"}).end()
+
+    (collected,) = exporter.get_finished_spans()
+    assert revenium_attributes(collected)[REVENIUM_MIDDLEWARE_SOURCE] == "custom"
+
+
+def test_a_span_outside_every_scope_carries_no_middleware_source() -> None:
+    """The default fills a missing key inside an active scope; it does not create one.
+
+    A bare ``revenium.middleware.source`` on an otherwise unattributed span would
+    assert Revenium provenance for traffic nobody attributed — spoofing the one
+    field that identifies the producer of a billing record (T-03-06). This
+    processor runs for *every* span in the host process, including in processes
+    that never call :func:`attribution` at all, so the wrong boundary here would
+    mark the customer's entire trace store as Revenium-sourced.
+    """
+    tracer, exporter = build_collecting_tracer()
+    tracer.start_span("chat", attributes={"gen_ai.operation.name": "chat"}).end()
+
+    (collected,) = exporter.get_finished_spans()
+    assert revenium_attributes(collected) == {}
+
+
+def test_the_default_is_not_applied_to_an_empty_snapshot_at_the_resolver_either() -> None:
+    """The boundary above, asserted at the layer that decides it rather than at the guard.
+
+    ``on_start`` returns early on an empty snapshot, so the previous test would
+    still pass if :func:`_scope.resolve_attributes` defaulted unconditionally —
+    the early return would be doing all the work, and the next caller of the
+    resolver (03-04's cap validation is already named as one) would inherit a
+    resolver that manufactures a key out of nothing.
+    """
+    assert _scope.resolve_attributes(_scope.current()) == {}
