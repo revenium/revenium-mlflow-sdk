@@ -819,10 +819,42 @@ def _error_type(span: _ReadableSpan, /) -> str | None:
 
     Returns ``None`` for any status other than ``ERROR``, which omits the key:
     ``_OTHER`` on every successful span would put the error rate at 100%.
+
+    **Both reads are guarded, and both guards are ``try``/``except`` because the
+    span's own accessors are what raise (WR-01, T-02-09-01).** Every other access
+    in :func:`map_span` is guarded by a value test — ``span.attributes or {}``,
+    ``span.context is not None`` — and these two cannot be, which is why they
+    were the two that survived to the verifier. Measured against the shipped
+    tree, not imagined:
+
+    * a span whose status was never set stores ``None``, and
+      ``ReadableSpan.status`` hands it back unchanged, so ``.status_code`` raised
+      ``AttributeError: 'NoneType' object has no attribute 'status_code'``. An
+      unset status is not an error status, so the key is omitted — the same
+      answer an ``OK`` span gets.
+    * a span whose events were never set raises **inside the property**:
+      ``ReadableSpan.events`` returns ``tuple(self._events)``, so
+      ``span.events or ()`` does not guard it, because the ``or`` is never
+      reached. That form would have looked like a fix and shipped the same
+      ``TypeError: 'NoneType' object is not iterable``. A span with no events
+      names no exception type, so an ERROR status still yields
+      :data:`ERROR_TYPE_UNKNOWN` rather than losing the failure.
+
+    Neither guard widens what is read. The status *description* is still never
+    touched, which ``tests/unit/test_semconv_derivations.py`` asserts against this
+    function's own source.
     """
-    if span.status.status_code is not _StatusCode.ERROR:
+    try:
+        status_code = span.status.status_code
+    except AttributeError:
         return None
-    for event in span.events:
+    if status_code is not _StatusCode.ERROR:
+        return None
+    try:
+        events = span.events
+    except TypeError:
+        events = ()
+    for event in events:
         if event.name != _EXCEPTION_EVENT_NAME:
             continue
         attributes = event.attributes or {}
@@ -1141,10 +1173,23 @@ def map_span(
     # it and no timings at all in production — the failure that only appears
     # after the tests are green.
     start_time_ns = span.start_time if span.start_time is not None else 0
-    # A span whose end time is unset is measured as zero-duration rather than
-    # negative. Whether any MLflow path produces one is unestablished (SEM-08),
-    # so the degradation is defined rather than left to arithmetic.
+    # SEM-08 has **two** degradations, and both are defined here rather than left
+    # to arithmetic. Whether any MLflow path produces either is unestablished,
+    # which is the reason to define them rather than a reason to skip them.
+    #
+    # 1. An unset end time is measured as the start time, so the call reads as
+    #    zero-duration rather than as one that ended at the Unix epoch.
+    # 2. An end time that *precedes* the start time is clamped to a zero
+    #    duration. Until plan 02-09 the comment above claimed the degradation was
+    #    defined while covering only case 1, and a backwards clock produced a
+    #    negative duration verbatim (reproduced: start 200, end 100, duration
+    #    -100). Zero is the right answer because a negative duration reads
+    #    downstream as a corrupt record rather than as a short call, and because
+    #    the OTel SDK's ``time_ns()`` timestamps carry no monotonicity guarantee
+    #    across a wall-clock step — so the backwards case is a clock artefact,
+    #    not a measurement to forward.
     end_time_ns = span.end_time if span.end_time is not None else start_time_ns
+    duration_ns = max(end_time_ns - start_time_ns, 0)
 
     return MappedSpan(
         # D-04 applied rather than merely declared (WR-03, T-02-08-04). Before
@@ -1165,5 +1210,5 @@ def map_span(
         parent_span_id=format(parent.span_id, "016x") if parent is not None else None,
         start_time_ns=start_time_ns,
         end_time_ns=end_time_ns,
-        duration_ns=end_time_ns - start_time_ns,
+        duration_ns=duration_ns,
     )

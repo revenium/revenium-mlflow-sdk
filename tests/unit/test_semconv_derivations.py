@@ -36,12 +36,18 @@ from typing import Any
 
 import pytest
 from opentelemetry.sdk.trace import Event, ReadableSpan
+from opentelemetry.trace import SpanKind
 from opentelemetry.trace.status import Status, StatusCode
 from opentelemetry.util.types import AttributeValue
 
 from revenium_mlflow.tracing import semconv
 from revenium_mlflow.tracing.semconv import map_span
-from tests.fixtures.spans import build_readable_span, error_span, mlflow_chat_model_span
+from tests.fixtures.spans import (
+    build_readable_span,
+    degenerate_span,
+    error_span,
+    mlflow_chat_model_span,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -634,6 +640,79 @@ def test_an_ok_status_span_carries_no_error_type() -> None:
     assert "error.type" not in map_span(mlflow_chat_model_span()).attributes
 
 
+# --- Degenerate input: the contract map_span states about itself (WR-01) ----
+#
+# ``map_span``'s docstring says it "returns a record on **every** input and
+# raises on none: a malformed attribute on one span must not fail the export
+# batch it happens to be in (T-02-05)". Until plan 02-09 that was a claim with
+# nothing behind it for two of the reads, and both were reproduced raising
+# against the shipped tree. ``classify_span`` already honoured the same contract,
+# so the gate would admit nothing and the mapper would still take down the batch.
+
+
+def test_a_span_with_no_status_maps_to_a_record() -> None:
+    """The read that raised ``AttributeError: 'NoneType' object has no attribute 'status_code'``.
+
+    A span whose status was never set stores ``None`` and ``ReadableSpan.status``
+    hands it back unchanged. An unset status is not an error status, so the
+    correct answer is the one an ``OK`` span gets: the key is omitted, not filled
+    with a sentinel that would put the error rate at 100%.
+    """
+    mapped = map_span(degenerate_span())
+    assert isinstance(mapped, semconv.MappedSpan)
+    assert "error.type" not in mapped.attributes
+
+
+def test_a_span_with_no_events_maps_to_a_record() -> None:
+    """The read that raised ``TypeError: 'NoneType' object is not iterable``.
+
+    It raised **inside the property**: ``ReadableSpan.events`` returns
+    ``tuple(self._events)``, so ``span.events or ()`` never reaches its ``or``
+    and would have shipped the same exception while looking like a guard.
+
+    The status here is ``ERROR`` on purpose. Asserting only that no exception was
+    raised would be satisfied by a guard that dropped the failure entirely; the
+    span really did fail, it just names no exception type, so ``_OTHER`` is the
+    answer that keeps the failure and forwards no text.
+    """
+    span = build_readable_span(
+        attributes={},
+        start_time_ns=_START_NS,
+        end_time_ns=_END_NS,
+        status=Status(StatusCode.ERROR),
+        unset_events=True,
+    )
+    mapped = map_span(span)
+    assert isinstance(mapped, semconv.MappedSpan)
+    assert mapped.attributes["error.type"] == "_OTHER"
+
+
+def test_a_span_with_no_context_reports_the_all_zero_ids() -> None:
+    """SEM-07 on the degenerate path, which no other test in the phase reaches.
+
+    The all-zero ids are OpenTelemetry's own invalid-id rendering, and
+    :func:`tests.fixtures.spans._fresh_context` sets ``| 1`` on both ids
+    precisely so a real context can never collide with them. ``parent_span_id``
+    stays ``None`` rather than becoming a zero id: the backend distinguishes a
+    root from a child on that field's presence, so a zero there would forge a
+    tree the customer never had.
+    """
+    mapped = map_span(degenerate_span())
+    assert mapped.trace_id == "0" * 32
+    assert mapped.span_id == "0" * 16
+    assert mapped.parent_span_id is None
+
+
+def test_the_degenerate_span_still_maps_to_client_span_kind() -> None:
+    """SEM-12 is the mapper's one unconditional guarantee, so it must survive this.
+
+    A ``CLIENT`` kind that held only on well-formed spans would be a conditional
+    guarantee documented as an unconditional one — the exact shape this plan
+    exists to remove from three other claims in the same module.
+    """
+    assert map_span(degenerate_span()).kind is SpanKind.CLIENT
+
+
 # --- Environment and region (SEM-09, D-C6) ---------------------------------
 
 
@@ -723,3 +802,40 @@ def test_a_wrong_mlflow_span_start_time_ns_does_not_change_the_duration() -> Non
         }
     )
     assert map_span(span).duration_ns == _DURATION_NS
+
+
+def test_a_span_with_an_unset_end_time_measures_as_zero_duration() -> None:
+    """The SEM-08 branch ``02-VERIFICATION.md`` marked ⚠ PARTIAL: present, unreachable.
+
+    The mapper always contained this fallback. No test could reach it because
+    ``build_readable_span`` typed ``end_time_ns`` as a required ``int``, so plan
+    02-09 widened the builder before this assertion could be written at all.
+    Measuring the end time as the start time makes the call read as
+    zero-duration rather than as one that ended at the Unix epoch.
+    """
+    span = build_readable_span(attributes={}, start_time_ns=_START_NS, end_time_ns=None)
+    mapped = map_span(span)
+    assert mapped.end_time_ns == _START_NS
+    assert mapped.duration_ns == 0
+
+
+def test_an_end_time_before_the_start_time_measures_as_zero_duration() -> None:
+    """The other half of the degradation, which the comment claimed and the code did not.
+
+    Reproduced against the shipped tree before the clamp: start 200, end 100,
+    ``duration_ns == -100``. The OTel SDK's ``time_ns()`` timestamps carry no
+    monotonicity guarantee across a wall-clock step, so a backwards span is a
+    clock artefact rather than a measurement, and a negative duration reads
+    downstream as a corrupt record rather than as a short call.
+
+    The subtraction is asserted negative first, so the two assertions below are
+    about a genuinely backwards span rather than about one that happened to
+    agree. And the non-negativity is asserted alongside the exact value on
+    purpose: a future change that dropped the clamp could not satisfy this by
+    returning some other wrong number.
+    """
+    assert _START_NS - _END_NS < 0
+    span = build_readable_span(attributes={}, start_time_ns=_END_NS, end_time_ns=_START_NS)
+    mapped = map_span(span)
+    assert mapped.duration_ns == 0
+    assert mapped.duration_ns >= 0
