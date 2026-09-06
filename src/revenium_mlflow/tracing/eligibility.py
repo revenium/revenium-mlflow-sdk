@@ -8,15 +8,23 @@ gate is an allowlist rather than a denylist: an unknown span type is rejected
 *structurally*, by not being a member of a positive set, rather than by having
 been thought of in advance.
 
-**Two paths, in order.** Path A is a span that already carries
-``gen_ai.operation.name`` — a bridged non-MLflow OpenTelemetry instrumentor, or a
-span MLflow has already translated. Path B is MLflow's own ``mlflow.spanType``.
-Path A first, and *exclusively*: a span that states its own operation is
-classified on that operation alone, so an ``execute_tool`` span is rejected even
-when it also carries an allowlisted ``mlflow.spanType``. An instrumentor's own
-assertion about what it did is better evidence than a type mapping, and falling
-through to the type after rejecting the operation would let the weaker signal
-overturn the stronger one. Both paths then run the same token-evidence gate.
+**One resolved operation, then the token gate.** The span's operation is
+resolved by :func:`semconv.operation_for_span` — the single site in this package
+where that question is answered — and admission is membership of
+:data:`BILLABLE_GENAI_OPERATIONS`. A span that states its own
+``gen_ai.operation.name`` is classified on it: a bridged non-MLflow OpenTelemetry
+instrumentor, or a span MLflow has already translated, and an instrumentor's own
+assertion about what it did is better evidence than a coarse vendor type. MLflow's
+``mlflow.spanType`` is the fallback for the span that states no operation of its
+own, reaching an operation through ``semconv.SPAN_TYPE_TO_OPERATION``. An
+``execute_tool`` span is therefore rejected even when it also carries an
+allowlisted ``mlflow.spanType``. The token-evidence gate then runs on whatever
+was admitted.
+
+**The resolver is shared with the mapper on purpose.** ``semconv.map_span``
+labels the span with the result of the same function, so a span cannot be
+admitted on one operation and rated under another (GAP-1). Do not re-derive the
+operation here.
 
 **Phases 3, 4 and 8 all call this same function object.** FB-05's claim that
 eligibility is decided exactly once is auditable only because there is exactly
@@ -43,11 +51,15 @@ from typing import Final as _Final
 from opentelemetry.sdk.trace import ReadableSpan as _ReadableSpan
 
 from . import _spanattrs
-from .semconv import GEN_AI_OPERATION_NAME as _GEN_AI_OPERATION_NAME
 from .semconv import GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS as _GEN_AI_CACHE_CREATION_TOKENS
 from .semconv import GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS as _GEN_AI_CACHE_READ_TOKENS
 from .semconv import GEN_AI_USAGE_INPUT_TOKENS as _GEN_AI_INPUT_TOKENS
 from .semconv import GEN_AI_USAGE_OUTPUT_TOKENS as _GEN_AI_OUTPUT_TOKENS
+
+# The shared precedence rule. ``GEN_AI_OPERATION_NAME`` itself is no longer
+# imported here: this module no longer reads that key, because reading it was
+# what let a second precedence rule live in this file (GAP-1).
+from .semconv import operation_for_span as _operation_for_span
 
 __all__ = [
     "BILLABLE_GENAI_OPERATIONS",
@@ -98,6 +110,15 @@ KNOWN_MLFLOW_SPAN_TYPES: _Final[frozenset[str]] = frozenset(
 #: ``RETRIEVER``, ``TOOL``, ``AGENT`` — are absent on purpose: they carry
 #: aggregate token counts that duplicate the model spans nested inside them, and
 #: admitting one would bill the same tokens twice.
+#:
+#: **:func:`classify_span` no longer reads this set, and it is still the published
+#: statement of which three types bill.** The type now reaches the decision
+#: through ``semconv.SPAN_TYPE_TO_OPERATION``, whose keys this set must stay
+#: set-equal to and whose values must stay members of
+#: :data:`BILLABLE_GENAI_OPERATIONS` — that set-equality is exactly what makes
+#: resolving the operation first and then testing it verdict-identical to the
+#: two-path branch this replaced. ``tests/unit/test_mlflow_vocabulary_drift.py``
+#: anchors on this set, and removing it would take the drift check with it.
 BILLABLE_MLFLOW_SPAN_TYPES: _Final[frozenset[str]] = frozenset(
     {
         "CHAT_MODEL",
@@ -203,7 +224,7 @@ def _has_token_evidence(attributes: _Mapping[str, object], /) -> bool:
 
 
 def _token_verdict(attributes: _Mapping[str, object], /) -> EligibilityReason:
-    """The tail both paths share, once the type or operation has been admitted."""
+    """The tail, once the resolved operation has been admitted."""
     if _has_token_evidence(attributes):
         return EligibilityReason.ADMITTED
     return EligibilityReason.NO_TOKEN_EVIDENCE
@@ -219,11 +240,18 @@ def classify_span(span: _ReadableSpan, /) -> EligibilityReason:
         :attr:`EligibilityReason.ADMITTED`, :attr:`EligibilityReason.WRONG_TYPE`
         or :attr:`EligibilityReason.NO_TOKEN_EVIDENCE`, and nothing else.
 
-    **Type first, then tokens.** The ordering is what makes SEM-11 structural
-    rather than incidental: an orchestration span is rejected on its type before
-    the token gate is ever consulted, so a ``CHAIN`` span carrying a thousand
-    input tokens is still ``WRONG_TYPE`` and can never be admitted by the
-    aggregate counts it duplicates from the model spans nested inside it.
+    **Operation first, then tokens.** The ordering is what makes SEM-11
+    structural rather than incidental: an orchestration span resolves to no
+    billable operation and is rejected before the token gate is ever consulted,
+    so a ``CHAIN`` span carrying a thousand input tokens is still ``WRONG_TYPE``
+    and can never be admitted by the aggregate counts it duplicates from the
+    model spans nested inside it.
+
+    **The operation is resolved by :func:`semconv.operation_for_span`, never
+    here.** One function in this package decides what operation a span performed,
+    and ``semconv.map_span`` labels the span with the result of that same call —
+    which is what makes it impossible for a span to be admitted on one operation
+    and rated under another (GAP-1). Do not re-derive it in this body.
 
     **The asymmetry that sets the gate's strictness (D-09).** A wrongly-rejected
     span can be re-admitted later by loosening this gate, and the customer sees a
@@ -242,17 +270,12 @@ def classify_span(span: _ReadableSpan, /) -> EligibilityReason:
     """
     attributes: _Mapping[str, object] = span.attributes or {}
 
-    # Path A — the span states its own operation, and that statement is final.
-    operation = attributes.get(_GEN_AI_OPERATION_NAME)
-    if isinstance(operation, str):
-        if operation not in BILLABLE_GENAI_OPERATIONS:
-            return EligibilityReason.WRONG_TYPE
-        return _token_verdict(attributes)
-
-    # Path B — MLflow's span type, decoded through the one shared decoder so this
-    # predicate and the mapper cannot disagree about what the span says.
-    span_type = _spanattrs.decode_str(attributes, _spanattrs.MLFLOW_SPAN_TYPE)
-    if span_type is None or span_type not in BILLABLE_MLFLOW_SPAN_TYPES:
+    # One resolution, shared with the mapper. A span that resolves to nothing —
+    # no declared operation and no allowlisted MLflow type — is WRONG_TYPE for
+    # the same structural reason an unrecognized value is: it is not a member of
+    # a positive set.
+    operation = _operation_for_span(attributes)
+    if operation not in BILLABLE_GENAI_OPERATIONS:
         return EligibilityReason.WRONG_TYPE
     return _token_verdict(attributes)
 

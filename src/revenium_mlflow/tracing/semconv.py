@@ -104,6 +104,7 @@ __all__ = [
     "MappedSpan",
     "infer_provider",
     "map_span",
+    "operation_for_span",
     "resource_claim_attributes",
 ]
 
@@ -664,20 +665,84 @@ def infer_provider(span: _ReadableSpan, /) -> str:
     return PROVIDER_SENTINEL
 
 
-def _operation(attributes: _Mapping[str, object], /) -> str | None:
-    """The GenAI operation for this span.
+def operation_for_span(attributes: _Mapping[str, object], /) -> str | None:
+    """What operation this span performed — the one place that question is answered.
 
-    The span type is consulted **first**, deliberately. A span carrying both an
-    MLflow type and a bridged ``gen_ai.operation.name`` could otherwise be
-    admitted on its type and then emitted under an operation the GenAI
-    conventions class as ``INTERNAL`` — a tool operation on a ``CLIENT`` span,
-    which is incoherent on the wire and reads as a rating error downstream.
+    Args:
+        attributes: A span's raw attribute mapping. An empty mapping is a legal
+            input and returns ``None``.
+
+    Returns:
+        The operation, or ``None`` when neither signal names one. A declared
+        operation is returned **unchanged, including the empty string** — see
+        below.
+
+    **The rule, in this order and no other (UD-1, GAP-1).**
+
+    1. ``gen_ai.operation.name``, when the span carries it as a ``str``.
+    2. Otherwise ``mlflow.spanType``, decoded through the shared reader, when the
+       decoded value is a key of :data:`SPAN_TYPE_TO_OPERATION`.
+    3. Otherwise ``None``.
+
+    **Why the declared operation wins.** It is the span's own explicit,
+    standards-defined OTel GenAI signal — an instrumentor's assertion about what
+    it did — while ``mlflow.spanType`` is a coarse vendor type that reaches an
+    operation only through a three-row table. The alternative, bringing
+    :func:`eligibility.classify_span` into line with the old span-type-first
+    ordering here, was rejected deliberately: it would change what is *admitted*,
+    which is what customers are billed for, and ``ROADMAP.md``'s Phase 2 note
+    fences that off — the eligibility filter is settled in Phase 2 and cannot be
+    loosened later. Changing the emitted label only changes what an
+    already-admitted span is rated as.
+
+    **This function exists so that :func:`eligibility.classify_span` and
+    :func:`map_span` cannot disagree.** Before it, each module carried its own
+    precedence rule and they were opposite: a span carrying
+    ``gen_ai.operation.name="chat"`` and ``mlflow.spanType="EMBEDDING"`` was
+    admitted as a chat completion and emitted as an embeddings call, and chat and
+    embeddings rate differently. It lives here, in ``semconv.py``, and is imported
+    by ``eligibility.py`` because that is the direction the existing module edge
+    already runs — ``semconv`` imports nothing from ``eligibility``, and inverting
+    that would create a cycle.
+
+    **No truthiness guard on step 1, and that is load-bearing.**
+    ``classify_span`` enters its declared-operation branch on ``isinstance`` alone,
+    so ``gen_ai.operation.name = ""`` rejects the span today rather than falling
+    through to the span type. Returning the empty string unchanged preserves that
+    verdict exactly; a truthiness guard here would silently widen admission, which
+    is the one direction a one-way-door billing predicate must not move by
+    accident. This read is a candidate for the shared ``_spanattrs`` decoder in
+    plan 02-07, whose checkpoint decides it — so if the empty-string case changes,
+    it changes as that recorded decision and not as a quiet edit here.
+
+    Comparison at step 2 is exact over the decoded string: no case folding, no
+    whitespace stripping, no Unicode normalization, matching
+    :func:`eligibility.classify_span`'s own equality rule.
     """
+    declared = attributes.get(GEN_AI_OPERATION_NAME)
+    if isinstance(declared, str):
+        return declared
     span_type = _spanattrs.decode_str(attributes, _spanattrs.MLFLOW_SPAN_TYPE)
     if span_type is not None and span_type in SPAN_TYPE_TO_OPERATION:
         return SPAN_TYPE_TO_OPERATION[span_type]
-    declared = attributes.get(GEN_AI_OPERATION_NAME)
-    return declared if isinstance(declared, str) and declared else None
+    return None
+
+
+def _operation(attributes: _Mapping[str, object], /) -> str | None:
+    """The operation to *emit*, which is :func:`operation_for_span` and one omission.
+
+    The resolution is not repeated here — there is exactly one precedence rule in
+    this package and it lives in :func:`operation_for_span`.
+
+    The single deliberate difference between this caller and the gate: an empty
+    declared operation is reported as ``None`` so :func:`map_span` omits the key
+    entirely. T-02-08 forbids a present key carrying no value — the OTLP encoder
+    ships an ``AnyValue`` with no field set and the backend reads that as an
+    answer rather than as an absence. The gate keeps the empty string because
+    there it is a rejection; here it is nothing to say. Read this as the one
+    documented asymmetry, not as drift.
+    """
+    return operation_for_span(attributes) or None
 
 
 def map_span(
