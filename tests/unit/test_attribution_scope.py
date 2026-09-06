@@ -38,6 +38,7 @@ from tests.fixtures.processors import (
     assert_the_scope_reaches_the_collected_span,
     build_collecting_tracer,
     revenium_attributes,
+    stamped,
 )
 from tests.fixtures.spans import genai_operation_span
 
@@ -95,8 +96,8 @@ def test_leaving_the_scope_restores_what_was_in_effect_before_it() -> None:
 
     collected = {span.name: revenium_attributes(span) for span in exporter.get_finished_spans()}
     assert collected == {
-        "inside-the-inner-scope": {REVENIUM_SUBSCRIBER_ID: "inner"},
-        "after-the-inner-scope": {REVENIUM_SUBSCRIBER_ID: "outer"},
+        "inside-the-inner-scope": stamped({REVENIUM_SUBSCRIBER_ID: "inner"}),
+        "after-the-inner-scope": stamped({REVENIUM_SUBSCRIBER_ID: "outer"}),
         "outside-every-scope": {},
     }
 
@@ -118,8 +119,8 @@ def test_a_nested_scope_merges_over_the_outer_one_without_mutating_it() -> None:
 
     collected = {span.name: revenium_attributes(span) for span in exporter.get_finished_spans()}
     assert collected == {
-        "nested": {REVENIUM_SUBSCRIBER_ID: "s-1", REVENIUM_PRODUCT_NAME: "p-1"},
-        "outer-again": {REVENIUM_SUBSCRIBER_ID: "s-1"},
+        "nested": stamped({REVENIUM_SUBSCRIBER_ID: "s-1", REVENIUM_PRODUCT_NAME: "p-1"}),
+        "outer-again": stamped({REVENIUM_SUBSCRIBER_ID: "s-1"}),
     }
 
 
@@ -143,7 +144,7 @@ def test_a_raising_body_restores_the_prior_state_and_propagates_the_same_excepti
         tracer.start_span("after-the-raise").end()
 
     (collected,) = exporter.get_finished_spans()
-    assert revenium_attributes(collected) == {REVENIUM_SUBSCRIBER_ID: "outer"}
+    assert revenium_attributes(collected) == stamped({REVENIUM_SUBSCRIBER_ID: "outer"})
 
 
 @pytest.mark.asyncio
@@ -167,8 +168,8 @@ async def test_two_interleaved_asyncio_tasks_never_see_each_others_attribution()
 
     collected = {span.name: revenium_attributes(span) for span in exporter.get_finished_spans()}
     assert collected == {
-        "s-1": {REVENIUM_SUBSCRIBER_ID: "s-1"},
-        "s-2": {REVENIUM_SUBSCRIBER_ID: "s-2"},
+        "s-1": stamped({REVENIUM_SUBSCRIBER_ID: "s-1"}),
+        "s-2": stamped({REVENIUM_SUBSCRIBER_ID: "s-2"}),
     }
 
 
@@ -202,7 +203,7 @@ def test_a_span_declaring_a_billable_operation_at_creation_is_stamped() -> None:
         tracer.start_span("chat", attributes=_creation_attributes(operation="chat")).end()
 
     (collected,) = exporter.get_finished_spans()
-    assert revenium_attributes(collected) == {REVENIUM_SUBSCRIBER_ID: SCOPED_SUBSCRIBER_ID}
+    assert revenium_attributes(collected) == stamped({REVENIUM_SUBSCRIBER_ID: SCOPED_SUBSCRIBER_ID})
 
 
 def test_a_span_declaring_no_operation_at_creation_is_stamped() -> None:
@@ -219,4 +220,4 @@ def test_a_span_declaring_no_operation_at_creation_is_stamped() -> None:
         tracer.start_span("Completions.create").end()
 
     (collected,) = exporter.get_finished_spans()
-    assert revenium_attributes(collected) == {REVENIUM_SUBSCRIBER_ID: SCOPED_SUBSCRIBER_ID}
+    assert revenium_attributes(collected) == stamped({REVENIUM_SUBSCRIBER_ID: SCOPED_SUBSCRIBER_ID})

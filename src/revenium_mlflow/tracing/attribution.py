@@ -97,7 +97,17 @@ def attribution(
         retry_number: Which retry attempt this call is.
         request_stream: Whether the request was streamed.
         middleware_source: Which Revenium middleware produced the telemetry.
-            This SDK's value is ``mlflow`` (ATTR-08, Phase 3).
+            The one parameter with a default *value* rather than merely a
+            default of ``None``: a span stamped inside this scope carries
+            ``revenium.middleware.source = "mlflow"`` unless you say otherwise
+            (ATTR-08). The default is applied where the snapshot becomes span
+            attributes, not here, so the published signature keeps its uniform
+            ``None`` and ``None`` keeps meaning "say nothing" for this parameter
+            as for the other twenty. **The default fills a missing key inside an
+            active scope; it does not create one** — a span created outside every
+            ``attribution()`` scope carries no ``revenium.*`` key at all,
+            including this one, because a bare ``middleware.source`` would claim
+            Revenium produced telemetry nobody attributed.
 
     Yields:
         Nothing. The scope is the value.

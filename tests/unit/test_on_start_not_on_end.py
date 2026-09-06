@@ -54,6 +54,7 @@ from tests.fixtures.processors import (
     assert_the_scope_reaches_the_collected_span,
     build_collecting_tracer,
     revenium_attributes,
+    stamped,
 )
 
 pytestmark = pytest.mark.unit
@@ -124,8 +125,16 @@ def test_the_on_end_write_is_silent_and_the_on_start_write_arrives(
         kept = _collect_one_scoped_span(ReveniumAttributionSpanProcessor())
 
     # Non-vacuity first: a run that attempted no write would satisfy the
-    # absent-attribute assertion below for entirely the wrong reason.
-    assert losing.writes_attempted == 1, "the control never attempted the write it exists to make"
+    # absent-attribute assertion below for entirely the wrong reason. The control
+    # writes one attribute per resolved key, and a scope naming one parameter now
+    # resolves to two — the named key and the defaulted ``middleware.source``
+    # (ATTR-08) — so the expected count is derived from the same helper the
+    # arrival assertion uses rather than left as the literal 1 it was before that
+    # default existed.
+    expected_writes = len(stamped({REVENIUM_SUBSCRIBER_ID: SCOPED_SUBSCRIBER_ID}))
+    assert losing.writes_attempted == expected_writes, (
+        "the control never attempted the writes it exists to make"
+    )
 
     # The half that makes the bug survivable: the call returns.
     assert losing.write_errors == []
@@ -134,7 +143,7 @@ def test_the_on_end_write_is_silent_and_the_on_start_write_arrives(
     assert revenium_attributes(lost) == {}
 
     # The shipped path, on the same shape, in the same process.
-    assert revenium_attributes(kept) == {REVENIUM_SUBSCRIBER_ID: SCOPED_SUBSCRIBER_ID}
+    assert revenium_attributes(kept) == stamped({REVENIUM_SUBSCRIBER_ID: SCOPED_SUBSCRIBER_ID})
 
     # Precisely how loud the loss is, measured rather than assumed. OpenTelemetry
     # does emit one thing — a WARNING on the ``opentelemetry.sdk.trace`` logger —
@@ -145,8 +154,9 @@ def test_the_on_end_write_is_silent_and_the_on_start_write_arrives(
     # ``ReveniumAttributionSpanProcessor`` records that MLflow suppresses this
     # warning in a real deployment, which is what removes even that thread.
     warnings = [record for record in caplog.records if record.levelno >= logging.WARNING]
-    assert [record.name for record in warnings] == ["opentelemetry.sdk.trace"]
-    assert "ended span" in warnings[0].getMessage()
+    assert {record.name for record in warnings} == {"opentelemetry.sdk.trace"}
+    assert len(warnings) == expected_writes
+    assert all("ended span" in record.getMessage() for record in warnings)
 
 
 def test_writing_through_on_ends_own_argument_raises_attribute_error() -> None:
@@ -215,4 +225,4 @@ def test_the_processors_disagree_about_the_span_and_agree_about_the_parent_conte
         tracer.start_span("chat", context=Context()).end()
 
     (collected,) = exporter.get_finished_spans()
-    assert revenium_attributes(collected) == {REVENIUM_SUBSCRIBER_ID: SCOPED_SUBSCRIBER_ID}
+    assert revenium_attributes(collected) == stamped({REVENIUM_SUBSCRIBER_ID: SCOPED_SUBSCRIBER_ID})

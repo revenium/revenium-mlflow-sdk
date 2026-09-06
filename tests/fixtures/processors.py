@@ -34,6 +34,8 @@ Everything is imported under a private alias so this module's public surface is
 exactly the names below.
 """
 
+from collections.abc import Mapping as _Mapping
+
 from opentelemetry.context import Context as _Context
 from opentelemetry.sdk.trace import ReadableSpan as _ReadableSpan
 from opentelemetry.sdk.trace import Span as _Span
@@ -46,6 +48,9 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 from opentelemetry.trace import Tracer as _Tracer
 from opentelemetry.util.types import AttributeValue as _AttributeValue
 
+from revenium_mlflow.attributes import (
+    REVENIUM_MIDDLEWARE_SOURCE as _REVENIUM_MIDDLEWARE_SOURCE,
+)
 from revenium_mlflow.attributes import REVENIUM_SUBSCRIBER_ID as _REVENIUM_SUBSCRIBER_ID
 from revenium_mlflow.tracing import ReveniumAttributionSpanProcessor as _ShippedProcessor
 from revenium_mlflow.tracing import _scope
@@ -64,6 +69,16 @@ _REVENIUM_PREFIX = "revenium."
 #: and its inverted twin in ``tests/unit/test_on_start_not_on_end.py`` cannot
 #: drift onto two different values and stop being the same assertion.
 SCOPED_SUBSCRIBER_ID = "s-1"
+
+#: What ``revenium.middleware.source`` reads on a stamped span when the caller
+#: supplied none (ATTR-08). Written out as a literal rather than imported from
+#: ``_scope.DEFAULT_MIDDLEWARE_SOURCE``: an expectation imported from the
+#: implementation agrees with it by construction and would follow it silently
+#: wherever it went. ``tests/unit/test_attribution_keys.py`` writes the same
+#: literal independently, so changing the shipped default reds both places, which
+#: is the intent — this key names the producer of a billing record and its value
+#: is not an implementation detail.
+EXPECTED_MIDDLEWARE_SOURCE = "mlflow"
 
 
 class OnEndWritingAttributionProcessor(_SpanProcessor):
@@ -191,6 +206,35 @@ def revenium_attributes(span: _ReadableSpan, /) -> dict[str, _AttributeValue]:
     }
 
 
+def stamped(supplied: _Mapping[str, _AttributeValue], /) -> dict[str, _AttributeValue]:
+    """The whole ``revenium.*`` mapping a scope supplying ``supplied`` produces.
+
+    Args:
+        supplied: The keys the scope actually named, by ``revenium.*`` wire key.
+            Must be non-empty. An empty scope stamps nothing at all — not even
+            the default — so ``stamped({})`` would be a lie about the boundary
+            ATTR-08 draws, and every assertion about an unattributed span is
+            written as a plain ``== {}`` for that reason.
+
+    Returns:
+        ``supplied`` plus the defaulted ``revenium.middleware.source``, unless
+        ``supplied`` named that key itself, in which case the caller's value
+        stands.
+
+    **This exists so that the ATTR-08 default is written down once per concern
+    rather than once per assertion.** Ten assertions across three modules are
+    *about* the subscriber id, the nesting, or the ``on_start``/``on_end``
+    distinction, and merely have to survive the default's existence. Spelling it
+    into each of them would mean ten places to edit and nine chances to leave one
+    subtly disagreeing about what a stamped span looks like — which is the
+    disagreement this single-owner module exists to prevent. The assertions that
+    are genuinely *about* the default live in
+    ``tests/unit/test_attribution_keys.py`` and do not use this helper.
+    """
+    assert supplied, "stamped() describes an attributed span; an empty scope stamps nothing"
+    return {_REVENIUM_MIDDLEWARE_SOURCE: EXPECTED_MIDDLEWARE_SOURCE, **supplied}
+
+
 def assert_the_scope_reaches_the_collected_span(processor: _SpanProcessor, /) -> None:
     """The phase's tracer assertion, parametrized over the processor under test.
 
@@ -212,4 +256,6 @@ def assert_the_scope_reaches_the_collected_span(processor: _SpanProcessor, /) ->
         tracer.start_span("chat").end()
     collected = exporter.get_finished_spans()
     assert len(collected) == 1, f"expected exactly one collected span, got {len(collected)}"
-    assert revenium_attributes(collected[0]) == {_REVENIUM_SUBSCRIBER_ID: SCOPED_SUBSCRIBER_ID}
+    assert revenium_attributes(collected[0]) == stamped(
+        {_REVENIUM_SUBSCRIBER_ID: SCOPED_SUBSCRIBER_ID}
+    )

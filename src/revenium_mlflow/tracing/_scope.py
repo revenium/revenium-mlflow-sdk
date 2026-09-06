@@ -45,8 +45,12 @@ from typing import Final as _Final
 from typing import TypeAlias as _TypeAlias
 
 from revenium_mlflow.attributes import REVENIUM_ATTRIBUTE_KEYS as _REVENIUM_ATTRIBUTE_KEYS
+from revenium_mlflow.attributes import (
+    REVENIUM_MIDDLEWARE_SOURCE as _REVENIUM_MIDDLEWARE_SOURCE,
+)
 
 __all__ = [
+    "DEFAULT_MIDDLEWARE_SOURCE",
     "PARAMETER_TO_ATTRIBUTE_KEY",
     "AttributionSnapshot",
     "AttributionValue",
@@ -89,6 +93,23 @@ _KEY_PREFIX: _Final[str] = "revenium."
 PARAMETER_TO_ATTRIBUTE_KEY: _Final[_Mapping[str, str]] = _types.MappingProxyType(
     {key.removeprefix(_KEY_PREFIX).replace(".", "_"): key for key in _REVENIUM_ATTRIBUTE_KEYS}
 )
+
+#: The value :data:`attributes.REVENIUM_MIDDLEWARE_SOURCE` takes when a caller
+#: inside an active scope supplied none (ATTR-08, and a Key Decision in
+#: PROJECT.md). It names *this* SDK, which is the whole point of the field:
+#: Revenium uses it to tell which middleware produced a record, and a record
+#: from this package that left it blank would be unattributable to a producer.
+#:
+#: **Applied here rather than as ``attribution()``'s parameter default.** The
+#: published signature says every one of the 21 parameters defaults to ``None``
+#: and ``test_attribution_signature.py`` pins that in
+#: ``test_every_attribution_parameter_defaults_to_none``. Moving the literal into
+#: ``attribution()``'s signature would be a published-signature
+#: change made silently, and it would break the ``None``-means-silence contract
+#: for that one parameter — the caller could no longer tell "I said nothing"
+#: apart from "I said ``mlflow``", which is the exact distinction
+#: :func:`enter` preserves for the other twenty.
+DEFAULT_MIDDLEWARE_SOURCE: _Final[str] = "mlflow"
 
 #: The value outside every scope. A shared, empty, unwritable mapping rather than
 #: ``None``: ``current()`` then has one return type, and the processor's hot-path
@@ -160,10 +181,13 @@ def resolve_attributes(snapshot: AttributionSnapshot, /) -> dict[str, Attributio
         snapshot: Usually the result of :func:`current`.
 
     Returns:
-        A plain mutable ``dict`` keyed by ``revenium.*`` wire key. Mutable and
-        freshly built on purpose: the caller iterates it once and drops it, and
-        handing back a proxy would allocate a second object to protect a value
-        nobody retains.
+        A plain mutable ``dict`` keyed by ``revenium.*`` wire key, carrying
+        :data:`DEFAULT_MIDDLEWARE_SOURCE` under
+        :data:`attributes.REVENIUM_MIDDLEWARE_SOURCE` when ``snapshot`` supplied
+        none — and empty, with no default in it, when ``snapshot`` is empty.
+        Mutable and freshly built on purpose: the caller iterates it once and
+        drops it, and handing back a proxy would allocate a second object to
+        protect a value nobody retains.
 
     Raises:
         KeyError: When ``snapshot`` carries a name that is not one of
@@ -197,5 +221,28 @@ def resolve_attributes(snapshot: AttributionSnapshot, /) -> dict[str, Attributio
     caller. Adding an encoding or coercion step anywhere downstream — in the
     processor's write loop, say — would put it after the point where the
     parameter name is gone.
+
+    **The ``middleware.source`` default fills a missing key inside an active
+    scope; it does not create a scope (ATTR-08, T-03-06).** An empty snapshot
+    resolves to an empty mapping and gets no default at all. The boundary is
+    drawn here rather than relied on from ``on_start``'s empty-snapshot early
+    return, because that early return exists for a different reason — it is the
+    hot-path guard for a process that never calls :func:`attribution` — and a
+    resolver that defaulted unconditionally would be correct only for as long as
+    ``on_start`` remained its only caller. It is already not going to be: 03-04's
+    cap validation reads this same function. A bare
+    ``revenium.middleware.source`` on an otherwise unattributed span would assert
+    Revenium provenance for traffic nobody attributed, and since this runs for
+    every span in the host process that would mark the customer's whole trace
+    store as Revenium-sourced.
+
+    ``setdefault`` rather than a pre-merge, so an explicit ``middleware_source``
+    the caller passed always wins. A default that overrode the caller would make
+    every record emitted through a wrapping integration claim to have come from
+    this SDK.
     """
-    return {PARAMETER_TO_ATTRIBUTE_KEY[name]: value for name, value in snapshot.items()}
+    if not snapshot:
+        return {}
+    resolved = {PARAMETER_TO_ATTRIBUTE_KEY[name]: value for name, value in snapshot.items()}
+    resolved.setdefault(_REVENIUM_MIDDLEWARE_SOURCE, DEFAULT_MIDDLEWARE_SOURCE)
+    return resolved
