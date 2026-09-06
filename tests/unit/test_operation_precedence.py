@@ -48,6 +48,7 @@ let one edit satisfy two guards at once — which is how two guards become one.
 import inspect
 import json
 from collections.abc import Callable, Mapping
+from typing import NamedTuple
 
 import pytest
 from opentelemetry.sdk.trace import ReadableSpan
@@ -311,3 +312,221 @@ def test_operation_and_type_comparison_is_exact_over_the_decoded_string(span_typ
 
     assert classify_span(span) is EligibilityReason.WRONG_TYPE
     assert operation_for_span(span.attributes or {}) is None
+
+
+# --- The recorded admission decision, made mechanical (plan 02-07) -----------
+#
+# Plan 02-07's `checkpoint:decision` carried `gate="blocking-human"` and was
+# answered `decode-everywhere`: every `gen_ai.*` attribute the SDK reads now goes
+# through `_spanattrs`, and the admission surface widens as a consequence. The
+# two tables below are that answer written down as data. `_spanattrs.decode_int`
+# carries the same decision in prose; this file is where it is executable.
+
+
+class _VerdictChange(NamedTuple):
+    """One span shape the decoder change moved, and where it moved it.
+
+    ``encodings`` holds every attribute mapping that expresses this one shape.
+    Shape 3 is a single shape — "the declared operation holds valid JSON that is
+    not a JSON string" — with three encodings, and each is named so a run that
+    goes red names the encoding rather than the group.
+    """
+
+    encodings: Mapping[str, Mapping[str, object]]
+    before: EligibilityReason
+    after: EligibilityReason
+
+
+class _VerdictControl(NamedTuple):
+    """One span shape the decision left alone, and the verdict it must still carry."""
+
+    attributes: Mapping[str, object]
+    verdict: EligibilityReason
+
+
+#: The five span shapes whose verdict moved, each with the verdict it carried
+#: before the change and the verdict it carries now. Nothing outside this table
+#: was permitted to move.
+_VERDICT_CHANGES: Mapping[str, _VerdictChange] = {
+    "shape1_json_string_billable_op": _VerdictChange(
+        encodings={
+            "shape1_json_string_billable_op": {
+                _OPERATION_KEY: json.dumps("chat"),
+                "gen_ai.usage.input_tokens": 10,
+            }
+        },
+        before=EligibilityReason.WRONG_TYPE,
+        after=EligibilityReason.ADMITTED,
+    ),
+    "shape2_empty_op_billable_type": _VerdictChange(
+        encodings={
+            "shape2_empty_op_billable_type": {
+                _OPERATION_KEY: "",
+                "mlflow.spanType": json.dumps("CHAT_MODEL"),
+                "gen_ai.usage.input_tokens": 10,
+            }
+        },
+        before=EligibilityReason.WRONG_TYPE,
+        after=EligibilityReason.ADMITTED,
+    ),
+    "shape3_non_string_json_op": _VerdictChange(
+        encodings={
+            "shape3_json_number_op": {
+                _OPERATION_KEY: "123",
+                "mlflow.spanType": json.dumps("CHAT_MODEL"),
+                "gen_ai.usage.input_tokens": 10,
+            },
+            "shape3_json_true_op": {
+                _OPERATION_KEY: "true",
+                "mlflow.spanType": json.dumps("CHAT_MODEL"),
+                "gen_ai.usage.input_tokens": 10,
+            },
+            "shape3_json_list_op": {
+                _OPERATION_KEY: "[1]",
+                "mlflow.spanType": json.dumps("CHAT_MODEL"),
+                "gen_ai.usage.input_tokens": 10,
+            },
+        },
+        before=EligibilityReason.WRONG_TYPE,
+        after=EligibilityReason.ADMITTED,
+    ),
+    "shape4_json_encoded_count": _VerdictChange(
+        encodings={
+            "shape4_json_encoded_count": {
+                _OPERATION_KEY: "chat",
+                "gen_ai.usage.input_tokens": json.dumps(10),
+            }
+        },
+        before=EligibilityReason.NO_TOKEN_EVIDENCE,
+        after=EligibilityReason.ADMITTED,
+    ),
+    # The fifth entry is the half of shape 1 that carries no token evidence. It
+    # is still rejected, so it is not part of the widening the decision accepted
+    # — but its *reason code* moves, and D-10 exists because that code is the one
+    # number a mis-tuned gate is visible in. A reason change nobody recorded is a
+    # reason change nobody can attribute later.
+    "shape5_json_string_op_without_tokens": _VerdictChange(
+        encodings={"shape5_json_string_op_without_tokens": {_OPERATION_KEY: json.dumps("chat")}},
+        before=EligibilityReason.WRONG_TYPE,
+        after=EligibilityReason.NO_TOKEN_EVIDENCE,
+    ),
+}
+
+#: The four controls. Each is a near neighbour of a shape above that must **not**
+#: have moved, which is what makes the change bounded rather than a blanket
+#: widening: a decoder that simply admitted more would take these with it.
+_VERDICT_UNCHANGED: Mapping[str, _VerdictControl] = {
+    "control_json_encoded_non_billable_op": _VerdictControl(
+        attributes={
+            _OPERATION_KEY: json.dumps("execute_tool"),
+            "mlflow.spanType": json.dumps("CHAT_MODEL"),
+            "gen_ai.usage.input_tokens": 10,
+        },
+        verdict=EligibilityReason.WRONG_TYPE,
+    ),
+    "control_bare_non_string_op": _VerdictControl(
+        attributes={
+            _OPERATION_KEY: 123,
+            "mlflow.spanType": json.dumps("CHAT_MODEL"),
+            "gen_ai.usage.input_tokens": 10,
+        },
+        verdict=EligibilityReason.ADMITTED,
+    ),
+    "control_json_encoded_true_count": _VerdictControl(
+        attributes={
+            _OPERATION_KEY: "chat",
+            "gen_ai.usage.input_tokens": json.dumps(True),
+        },
+        verdict=EligibilityReason.NO_TOKEN_EVIDENCE,
+    ),
+    "control_bare_integer_count": _VerdictControl(
+        attributes={
+            _OPERATION_KEY: "chat",
+            "gen_ai.usage.input_tokens": 10,
+        },
+        verdict=EligibilityReason.ADMITTED,
+    ),
+}
+
+
+def _verdict_cases() -> list[tuple[str, Mapping[str, object], EligibilityReason]]:
+    """Both tables flattened to (name, attributes, the verdict that must hold now)."""
+    cases: list[tuple[str, Mapping[str, object], EligibilityReason]] = [
+        (name, attributes, change.after)
+        for change in _VERDICT_CHANGES.values()
+        for name, attributes in change.encodings.items()
+    ]
+    cases.extend(
+        (name, control.attributes, control.verdict) for name, control in _VERDICT_UNCHANGED.items()
+    )
+    return cases
+
+
+@pytest.mark.parametrize(
+    ("attributes", "expected"),
+    [
+        pytest.param(attributes, expected, id=name)
+        for name, attributes, expected in _verdict_cases()
+    ],
+)
+def test_every_enumerated_shape_carries_the_verdict_the_decision_recorded(
+    attributes: Mapping[str, object], expected: EligibilityReason
+) -> None:
+    """The tables above are the recorded decision made mechanical.
+
+    Routing the ``gen_ai.*`` reads through the shared decoder changes which spans
+    are billed, and ``ROADMAP.md``'s Phase 2 note fences that off as a one-way
+    door. The decision naming the shapes that move is therefore only worth as
+    much as its closure: a *sixth* shape quietly changing verdict is completely
+    invisible to a suite that asserts only the five that were decided. That is
+    what :data:`_VERDICT_UNCHANGED` is for — the controls are near neighbours of
+    the shapes that moved, so a decoder that had simply admitted more would take
+    them with it and fail here. Together the two tables make the change bounded
+    rather than merely intended.
+
+    The expectations are literals in this file, never imported from
+    ``eligibility``. A table read out of the module under test agrees with every
+    future edit to it, including the edit that widens a billing predicate.
+    """
+    span = build_readable_span(attributes=attributes, start_time_ns=_START_NS, end_time_ns=_END_NS)
+
+    assert classify_span(span) is expected
+
+
+def test_every_recorded_change_moved_and_no_shape_is_named_twice() -> None:
+    """``before`` is load-bearing, not decoration, and the tables do not overlap.
+
+    An entry whose recorded ``before`` equals its ``after`` is a shape that did
+    not actually move, and it would pad the change set with a case that proves
+    nothing while making the enumeration look more thorough than it is. A name
+    appearing in both tables would claim the same shape both moved and held.
+    """
+    stationary = [
+        name for name, change in _VERDICT_CHANGES.items() if change.before is change.after
+    ]
+    assert stationary == [], stationary
+
+    changed_names = {name for change in _VERDICT_CHANGES.values() for name in change.encodings}
+    assert changed_names.isdisjoint(_VERDICT_UNCHANGED)
+
+
+def test_a_json_encoded_operation_reaches_the_wire_without_literal_quotes() -> None:
+    """T-02-07-02: the form this project's constraints record as backend-dropping.
+
+    Before the decoder change this span emitted ``'"chat"'`` — the operation with
+    its JSON quotes still attached, which is the exact shape CLAUDE.md names for
+    ``mlflow.tracing.configure`` ("emits ``'"org-A"'`` with literal quotes;
+    backend drops/mis-stores"). Equality against ``"chat"`` alone would pass on a
+    value that had been stripped by some other means, so the absence of the
+    quote character is asserted as well.
+    """
+    span = build_readable_span(
+        attributes={_OPERATION_KEY: json.dumps("chat"), "gen_ai.usage.input_tokens": 10},
+        start_time_ns=_START_NS,
+        end_time_ns=_END_NS,
+    )
+
+    emitted = map_span(span).attributes[_OPERATION_KEY]
+
+    assert emitted == "chat"
+    assert '"' not in str(emitted)

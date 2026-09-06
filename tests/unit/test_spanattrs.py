@@ -34,6 +34,7 @@ import pytest
 
 from revenium_mlflow.tracing._spanattrs import (
     decode,
+    decode_int,
     decode_mapping,
     decode_str,
     is_positive_int,
@@ -124,6 +125,50 @@ def test_decode_str_reports_a_non_string_as_absent() -> None:
 def test_decode_mapping_reports_a_non_mapping_as_absent() -> None:
     """A usage attribute holding a list must not be indexed as if it were a dict."""
     assert decode_mapping({"mlflow.chat.tokenUsage": "[1, 2]"}, "mlflow.chat.tokenUsage") is None
+
+
+@pytest.mark.parametrize(
+    ("attributes", "expected"),
+    [
+        ({"k": "10"}, 10),
+        ({"k": 10}, 10),
+        ({"k": "-7"}, -7),
+        ({"k": "true"}, None),
+        ({"k": True}, None),
+        ({"k": "abc"}, None),
+        ({"k": ""}, None),
+        ({}, None),
+    ],
+)
+def test_decode_int_narrows_the_decoded_value_to_a_non_bool_int(
+    attributes: dict[str, object], expected: int | None
+) -> None:
+    """One reader for a token count, in both the spelling MLflow writes and the bare one.
+
+    ``"10"`` is what a count looks like after MLflow's serializer and before
+    anything decoded it; ``10`` is what a bridged instrumentor writes. The gate
+    and the emitter must agree on both, which they cannot do while one of them
+    reads the attribute raw.
+
+    ``-7`` is returned rather than dropped on purpose: this helper reports what
+    was recorded, and what to do about a negative count is a policy its callers
+    hold. Every expectation here is a literal, never imported from the module
+    under test.
+    """
+    assert decode_int(attributes, "k") == expected
+
+
+def test_decode_int_rejects_true() -> None:
+    """The bool exclusion, restated for the narrowing helper because it is separate code.
+
+    ``isinstance(True, int)`` is ``True`` in Python and the OTLP encoder ships
+    such a value as ``bool_value: true``. ``decode_int`` excludes ``bool``
+    **before** it accepts ``int``, in that order, so a boolean cannot reach a
+    billed token count through the emit path any more than it can through the
+    gate.
+    """
+    assert decode_int({"k": True}, "k") is None
+    assert decode_int({"k": "true"}, "k") is None
 
 
 def test_is_positive_int_rejects_true() -> None:
