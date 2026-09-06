@@ -34,7 +34,9 @@ Everything is imported under a private alias so this module's public surface is
 exactly the names below.
 """
 
+from opentelemetry.context import Context as _Context
 from opentelemetry.sdk.trace import ReadableSpan as _ReadableSpan
+from opentelemetry.sdk.trace import Span as _Span
 from opentelemetry.sdk.trace import SpanProcessor as _SpanProcessor
 from opentelemetry.sdk.trace import TracerProvider as _TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor as _SimpleSpanProcessor
@@ -46,6 +48,7 @@ from opentelemetry.util.types import AttributeValue as _AttributeValue
 
 from revenium_mlflow.attributes import REVENIUM_SUBSCRIBER_ID as _REVENIUM_SUBSCRIBER_ID
 from revenium_mlflow.tracing import ReveniumAttributionSpanProcessor as _ShippedProcessor
+from revenium_mlflow.tracing import _scope
 from revenium_mlflow.tracing import attribution as _attribution
 
 #: The prefix every ATTR-07 key carries. :func:`revenium_attributes` filters on
@@ -61,6 +64,75 @@ _REVENIUM_PREFIX = "revenium."
 #: and its inverted twin in ``tests/unit/test_on_start_not_on_end.py`` cannot
 #: drift onto two different values and stop being the same assertion.
 SCOPED_SUBSCRIBER_ID = "s-1"
+
+
+class OnEndWritingAttributionProcessor(_SpanProcessor):
+    """The ATTR-02 mistake, built deliberately: the same write, one callback late.
+
+    **This is the realistic form of the bug and the silent one.** It differs from
+    the shipped processor in exactly one respect — *when* it writes — so a test
+    that runs both proves something about timing rather than about two unrelated
+    processors. It reads the same ``_scope`` snapshot the shipped one reads, and
+    it captures that snapshot at ``on_start`` rather than re-reading it at
+    ``on_end``: re-reading would confound "the write was too late" with "the
+    attribution scope had already closed", and only the first of those is ATTR-02.
+
+    **Why it writes through a retained live-span reference.** Writing through
+    ``on_end``'s own argument raises ``AttributeError``, because that argument is
+    a ``ReadableSpan`` with no ``set_attribute`` on it at all — a loud failure
+    nobody ships, reproduced separately in
+    ``tests/unit/test_on_start_not_on_end.py``. The retained reference is the
+    version that *does* have the method, because ``Span.end()`` has already
+    frozen the attribute store behind it. The write returns normally and the
+    value is gone. Reproduced against this repository's ``.venv`` before it was
+    written down.
+
+    :attr:`writes_attempted` and :attr:`write_errors` exist so a test can assert
+    the non-vacuous version of the claim. "The attribute is absent" is also what
+    a processor that never ran at all would produce; "one write was attempted, it
+    raised nothing, and the attribute is absent" is the claim ATTR-02 actually
+    makes.
+
+    Plan 03-06 imports this class too, for the AST guard over ``on_end``. It
+    lives here rather than in a test module for the single-owner reason at the
+    top of this file.
+    """
+
+    def __init__(self) -> None:
+        """Start with nothing retained and nothing attempted."""
+        #: Span id to the live span and the attribution captured with it.
+        self._retained: dict[int, tuple[_Span, dict[str, _AttributeValue]]] = {}
+        #: How many ``set_attribute`` calls ``on_end`` made. Zero means the test
+        #: proved nothing.
+        self.writes_attempted = 0
+        #: Anything those calls raised. Expected to stay empty — that emptiness
+        #: is half of what makes the loss silent rather than reportable.
+        self.write_errors: list[BaseException] = []
+
+    def on_start(self, span: _Span, parent_context: _Context | None = None) -> None:
+        """Retain the live span and the attribution, and write nothing yet."""
+        snapshot = _scope.current()
+        if not snapshot:
+            return
+        context = span.get_span_context()
+        self._retained[context.span_id] = (span, dict(_scope.resolve_attributes(snapshot)))
+
+    def on_end(self, span: _ReadableSpan) -> None:
+        """Attempt the write through the retained reference, and record what happened."""
+        context = span.get_span_context()
+        retained = self._retained.pop(context.span_id, None) if context is not None else None
+        if retained is None:
+            return
+        live, attributes = retained
+        for key, value in attributes.items():
+            self.writes_attempted += 1
+            try:
+                live.set_attribute(key, value)
+            # Deliberately as broad as it gets. The claim under test is that
+            # *nothing* is raised, and a narrower clause would let an unexpected
+            # exception type escape and be read as a different failure.
+            except Exception as error:
+                self.write_errors.append(error)
 
 
 def build_collecting_tracer(
