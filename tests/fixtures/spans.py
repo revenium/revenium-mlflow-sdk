@@ -6,7 +6,19 @@ deliberate rather than tidy: six test modules need these spans, and a builder
 four plans extend independently is exactly how two fixtures come to disagree
 about what an MLflow span looks like — after which a green suite proves nothing.
 A shape too narrow to earn a named helper is built from
-:func:`build_readable_span` at the call site, not by adding a ninth helper here.
+:func:`build_readable_span` at the call site, not by adding another helper here.
+
+**Plan 02-09 is the one exception, and it is recorded rather than quietly taken.**
+It widened :func:`build_readable_span` and added the ninth helper,
+:func:`degenerate_span`. The rule above sends a one-off shape to the call site
+because a call-site shape is read by one test; this shape had to be read by
+*every* sweep. ``tests/unit/test_semconv_allowlist.py`` and
+``tests/unit/test_operation_precedence.py`` derive their subjects from ``vars()``
+of this module, so the malformed-input contract only reaches those guards if the
+shape lives here. No pre-existing helper's defaults changed, and neither did
+:data:`_CAPTURED_USAGE`, :data:`_MLFLOW_RESOURCE` or the two default timestamps —
+the disagreement the rule exists to prevent is between *fixtures*, and adding a
+subject to the shared module is the opposite of that.
 
 **Nothing here imports MLflow, at module scope or anywhere else.**
 ``tests/conftest.py`` silences MLflow's outbound telemetry from a session-scoped
@@ -37,7 +49,7 @@ builder must produce the wire shape, not a convenience shape, or every test
 downstream of it exercises a span that never existed.
 
 Everything is imported under a private alias so that this module's public
-surface is exactly the eight helpers below, checkable with one command.
+surface is exactly the nine helpers below, checkable with one command.
 """
 
 import json as _json
@@ -128,12 +140,15 @@ def build_readable_span(
     *,
     attributes: _Mapping[str, _AttributeValue],
     kind: _SpanKind = _SpanKind.INTERNAL,
-    start_time_ns: int,
-    end_time_ns: int,
+    start_time_ns: int | None,
+    end_time_ns: int | None,
     parent: _SpanContext | None = None,
     status: _Status | None = None,
     events: _Sequence[_Event] = (),
     name: str = _DEFAULT_SPAN_NAME,
+    unset_status: bool = False,
+    unset_events: bool = False,
+    unset_context: bool = False,
 ) -> _ReadableSpan:
     """Build one ``ReadableSpan``, storing ``attributes`` verbatim.
 
@@ -150,19 +165,43 @@ def build_readable_span(
     are passed explicitly instead of being silently dropped — a span missing its
     scope is a span the backend and the customer's own collector read differently
     from a real one.
+
+    **``start_time_ns`` and ``end_time_ns`` accept ``None``, and that is what
+    makes the mapper's own degradation branch testable.** ``map_span`` already
+    contained an unset-``end_time`` fallback, and
+    ``02-VERIFICATION.md`` recorded SEM-08 as ⚠ PARTIAL for exactly one reason:
+    this builder typed both timings as required ``int`` and passed them straight
+    through, so no test could reach the branch. They are passed through
+    uncoerced for the same reason they always were — a builder that substituted
+    a default here would make the branch permanently unreachable rather than
+    merely untested. Both stay keyword-only and required: a caller must still
+    say what the timings are, including when the answer is ``None``.
+
+    **The three ``unset_*`` flags are separate parameters rather than an
+    overload of ``status``, ``events`` and a new ``context``, deliberately.**
+    The coercion ``status if status is not None else Status(OK)`` makes a
+    *stored* ``None`` impossible through ``status=`` alone, and reusing the
+    parameter would make ``status=None`` mean two different things depending on
+    a second argument — the implicit rule this module's docstring argues
+    against. Each flag reproduces one shape ``map_span`` was measured raising or
+    degrading on; :func:`degenerate_span` carries all three at once and is what
+    most callers want.
     """
     links: _Sequence[_Link] = ()
+    resolved_status = (
+        None if unset_status else (status if status is not None else _Status(_StatusCode.OK))
+    )
     return _ReadableSpan(
         name=name,
-        context=_fresh_context(),
+        context=None if unset_context else _fresh_context(),
         parent=parent,
         resource=_MLFLOW_RESOURCE,
         attributes=attributes,
-        events=events,
+        events=None if unset_events else events,
         links=links,
         kind=kind,
         instrumentation_scope=_InstrumentationScope(_MLFLOW_SCOPE_NAME),
-        status=status if status is not None else _Status(_StatusCode.OK),
+        status=resolved_status,
         start_time=start_time_ns,
         end_time=end_time_ns,
     )
@@ -391,4 +430,47 @@ def genai_operation_span(
         attributes=attributes,
         start_time_ns=_DEFAULT_START_TIME_NS,
         end_time_ns=_DEFAULT_END_TIME_NS,
+    )
+
+
+def degenerate_span() -> _ReadableSpan:
+    """The malformed span ``map_span``'s own contract claims to survive, actually built.
+
+    ``map_span``'s docstring says it "returns a record on **every** input and
+    raises on none: a malformed attribute on one span must not fail the export
+    batch it happens to be in (T-02-05)". ``classify_span`` already honours that
+    half of the contract — it returns ``WRONG_TYPE`` on this shape rather than
+    raising — so before this helper existed the *mapper's* half was asserted in
+    a docstring and checked by nothing.
+
+    Both shapes were reproduced against the shipped tree before this helper was
+    written, and both are carried here at once so one subject covers both:
+
+    * an unset status raised ``AttributeError: 'NoneType' object has no
+      attribute 'status_code'``;
+    * unset events raised ``TypeError: 'NoneType' object is not iterable``. That
+      one comes out of ``ReadableSpan.events`` itself, which returns
+      ``tuple(self._events)``, so reading ``span.events or ()`` at the call site
+      does **not** guard it — the property raises before the ``or`` is reached.
+
+    It also carries an empty attribute mapping and no span context, which reaches
+    the two remaining degenerate branches in one go: the provider sentinel, and
+    the all-zero trace and span ids that stand in for a context the mapper was
+    not given.
+
+    Public and parameterless on purpose. ``tests/unit/test_semconv_allowlist.py``
+    and ``tests/unit/test_operation_precedence.py`` both derive their sweep
+    subjects from ``vars()`` of this module, filtered on ``__module__``, so a
+    helper with no required parameter joins both sweeps without either file
+    being edited. That is the point of the shape: the malformed-input contract
+    gets exercised by the closed-set guards and by the operation-agreement guard,
+    not only by the tests written for it.
+    """
+    return build_readable_span(
+        attributes={},
+        start_time_ns=_DEFAULT_START_TIME_NS,
+        end_time_ns=_DEFAULT_END_TIME_NS,
+        unset_status=True,
+        unset_events=True,
+        unset_context=True,
     )
