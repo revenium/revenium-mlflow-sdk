@@ -267,3 +267,11 @@ AGENTS.md
 
 # GSD tooling runtime state (dispatch sentinel, run-scoped)
 .gsd/
+
+# MLflow local tracking artifacts. Nothing in the suite should produce these —
+# tests/unit/test_stamp_time_evidence.py points MLFLOW_TRACKING_URI at a sqlite
+# file under tmp_path precisely so it does not — but a bare `import mlflow` plus
+# one span in an interactive session drops a tracking store in the repository
+# root, and it is 800 KB of binary nobody would notice in a `git add .`.
+mlruns/
+mlflow.db
