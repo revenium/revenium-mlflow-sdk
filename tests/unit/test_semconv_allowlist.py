@@ -483,6 +483,37 @@ def test_the_sweep_emits_only_keys_from_the_closed_set() -> None:
     )
 
 
+def test_the_emitted_keys_are_a_subset_of_the_closed_set_by_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WR-03: a statement about the *function*, where the sweep is one about the fixtures.
+
+    ``test_the_sweep_emits_only_keys_from_the_closed_set`` above asserts that the
+    spans in the sweep emit no stray key. That is a claim about those spans. It
+    cannot see a key emitted on a code path the fixtures do not reach — which is
+    exactly the "leaks nobody thought of" case the module docstring says the
+    closed allowlist structurally prevents. Until plan 02-08,
+    ``EMITTED_ATTRIBUTE_KEYS`` was consulted by nothing at runtime: the allowlist
+    was a naming convention plus this file.
+
+    So this narrows the set to a single key and asserts the mapper's output
+    narrows with it. ``map_span`` is pure and has no injection point, so there is
+    no stray key to plant; substituting the set is the one way to observe the
+    filter *firing* rather than to read the source and infer that it would.
+    Equality rather than containment is what makes it non-vacuous in both
+    directions: a mapper that ignored the set emits eleven keys here, and one that
+    dropped everything emits none.
+    """
+    narrowed = frozenset({semconv.GEN_AI_PROVIDER_NAME})
+    monkeypatch.setattr(semconv, "EMITTED_ATTRIBUTE_KEYS", narrowed)
+    emitted = set(semconv.map_span(_all_spans()["content_span"]).attributes)
+    assert emitted == set(narrowed), _symmetric_difference(
+        "map_span did not filter its output against EMITTED_ATTRIBUTE_KEYS",
+        emitted,
+        set(narrowed),
+    )
+
+
 def test_no_emitted_key_names_a_cost() -> None:
     """T-02-04, and **not** redundant with the namespace guard below.
 

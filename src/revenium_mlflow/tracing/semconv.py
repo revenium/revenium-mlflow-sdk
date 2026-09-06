@@ -343,6 +343,105 @@ FINISH_REASON_SOURCES: _Final[tuple[tuple[str, str | None], ...]] = (
     ("stop_reason", None),
 )
 
+#: The finish reasons a provider is permitted to report, lowercased. A value
+#: outside this set is a string from a response body, not a reason, and is
+#: dropped rather than forwarded (plan 02-08, 02-REVIEW.md CR-02).
+#:
+#: **Class A: the emitted value is constrained by membership, not by shape.**
+#: This is the same allowlist-not-denylist discipline the module docstring
+#: applies to keys, applied one level down to values — a value cannot escape a
+#: set it is not a member of. It is what closes all three GAP-2 reproductions at
+#: once: a credential-bearing URL, a 50,000-character string and a clinical
+#: sentence are non-members, so none of them is a finish reason.
+#:
+#: The three groups, recorded by provider vocabulary so a future addition can be
+#: argued about rather than guessed at:
+#:
+#: 1. OpenAI chat completions ``finish_reason`` — ``stop``, ``length``,
+#:    ``tool_calls``, ``content_filter``, ``function_call``.
+#: 2. OpenAI Responses ``status`` — ``completed``, ``incomplete``, ``failed``,
+#:    ``cancelled``, ``in_progress``.
+#: 3. Anthropic ``stop_reason`` — ``end_turn``, ``max_tokens``,
+#:    ``stop_sequence``, ``pause_turn``, ``refusal``.
+#:
+#: **The accepted cost, recorded rather than hidden.** A legitimate finish reason
+#: from a provider whose vocabulary is not in the set is dropped, and the absence
+#: is silent — the key is simply missing. There is also no drift test that can
+#: catch an addition, because there is no upstream table to anchor one on, unlike
+#: ``eligibility.KNOWN_MLFLOW_SPAN_TYPES``, which
+#: ``tests/unit/test_mlflow_vocabulary_drift.py`` anchors on MLflow's own. The
+#: set is CR-02's list verbatim; whether it is complete for any provider's
+#: current vocabulary is **unestablished in this repository** — no measurement
+#: here establishes it, and CLAUDE.md forbids the live calls that would.
+#:
+#: A ``frozenset`` for the reason :data:`EMITTED_ATTRIBUTE_KEYS` and
+#: ``attributes.ATTRIBUTE_CAPS`` are: a caller who could widen it in their own
+#: process would be changing what leaves the customer's machine.
+_KNOWN_FINISH_REASONS: _Final[frozenset[str]] = frozenset(
+    {
+        # OpenAI chat completions.
+        "stop",
+        "length",
+        "tool_calls",
+        "content_filter",
+        "function_call",
+        # OpenAI Responses.
+        "completed",
+        "incomplete",
+        "failed",
+        "cancelled",
+        "in_progress",
+        # Anthropic.
+        "end_turn",
+        "max_tokens",
+        "stop_sequence",
+        "pause_turn",
+        "refusal",
+    }
+)
+
+#: Nothing read out of a response body, and nothing carrying an identifier the
+#: span declared, reaches the wire longer than this.
+#:
+#: **The count is Python ``str`` code points — not bytes, not grapheme
+#: clusters.** That is written down because "whose definition of length applies"
+#: is otherwise a question with three defensible answers and no recorded one
+#: (SEM-06 encoding edge). A four-byte emoji is one code point here, and a
+#: combining sequence is as many code points as it has scalars.
+#:
+#: **It is a hard reject, never a truncation**, and the boundary is asserted from
+#: both sides in ``tests/unit/test_semconv_derivations.py``: a value at exactly
+#: the cap is emitted, a value one code point over is omitted. A truncated
+#: response id is a *wrong* response id, and a wrong id is worse than an absent
+#: one when a charge is disputed. ``attributes.ATTRIBUTE_CAPS`` records the same
+#: shape from the other side: Revenium's ingest silently drops an oversized value
+#: rather than truncating it, so it vanishes with no error on either side. That
+#: module publishes the ``revenium.*`` caps as data; this constant is the
+#: enforcement half for the ``gen_ai.*`` namespace, where no document in this
+#: repository names a backend cap at all — so this figure is an SDK-side rule,
+#: not a mirrored backend one.
+#:
+#: **The figure, and the reasoning that sized it, recorded verbatim as the human
+#: answering plan 02-08's ``gate="blocking-human"`` checkpoint gave it** — so the
+#: residual T-02-08-07 stays traceable to the number that sized it:
+#:
+#:     64 halves the T-02-08-07 residual and matches the `ATTRIBUTE_CAPS` floor
+#:     for `revenium.*`, and is consistent with D-09's asymmetry that close calls
+#:     are decided towards rejection. The figure does NOT close T-02-08-07: a
+#:     `rev_sk_`-prefixed credential fits comfortably under 64, and would also
+#:     have fit under the 128 alternative, so the choice traded silent metering
+#:     loss against credential-window width rather than closing the leak. The
+#:     known and accepted risk is that `gen_ai.request.model` is silently dropped
+#:     for a Bedrock inference-profile ARN (~101 code points) or a Vertex
+#:     publisher path (~92) IF MLflow records the long form in the model field.
+#:     Whether it does is UNESTABLISHED in this repository: the identifier
+#:     lengths that informed this figure were computed from published identifier
+#:     *formats*, not measured from MLflow output, no fixture here carries a model
+#:     string longer than 22 characters, and CLAUDE.md forbids the live calls that
+#:     would settle it. That loss would be a metering loss, not a rating failure —
+#:     the span still rates under the unknown-model path — and it would be silent.
+_MAX_EMITTED_VALUE_CHARS: _Final[int] = 64
+
 #: The value the SDK claims at **resource** level (D-15, SEM-02).
 #:
 #: Its only job is to satisfy ``GenAISemanticConventionMapper.canHandle``, which
@@ -470,10 +569,25 @@ def _token_int(value: object, /) -> int | None:
     recorded can be put on the wire, and a recorded zero is a fact worth
     forwarding. The ``bool`` exclusion is common to both and non-negotiable:
     ``isinstance(True, int)`` is true and the encoder would ship ``bool_value``.
+
+    **A negative count is dropped (WR-02, T-02-08-03), and that is not the same
+    call as accepting zero.** A recorded zero is a measurable fact: the provider
+    reported no tokens for that field. ``-7`` is not a measurement at all — it is
+    a broken integration — and depending on backend arithmetic it lands as a
+    silent credit or as a corrupted total. ``_spanattrs.is_positive_int`` already
+    rejects negatives for the gate; this brings the emit path into line, so the
+    two do not disagree about the same number on the same span. The two halves
+    are asserted separately in ``tests/unit/test_semconv_derivations.py`` — a
+    blanket drop that took the recorded zero with it would satisfy one and red
+    the other.
+
+    ``decode_int`` upstream deliberately does *not* apply this rule: it reports
+    what was recorded, and the policy lives here so it lives in exactly one
+    place, on both the usage-dict source and the flat ``gen_ai.usage.*`` fallback.
     """
     if isinstance(value, bool) or not isinstance(value, int):
         return None
-    return value
+    return value if value >= 0 else None
 
 
 def resource_claim_attributes() -> _Mapping[str, str]:
@@ -494,12 +608,88 @@ def resource_claim_attributes() -> _Mapping[str, str]:
     return _RESOURCE_CLAIM_ATTRIBUTES
 
 
+def _clean_reason(value: object, /) -> str | None:
+    """One finish reason that is safe to emit, or ``None`` to fall through.
+
+    Args:
+        value: Whatever was read out of a :data:`FINISH_REASON_SOURCES` field. It
+            is arbitrary application data — ``mlflow.spanOutputs`` on a
+            ``@mlflow.trace``-decorated function is that function's serialized
+            return value, not a provider enum.
+
+    Returns:
+        The candidate, stripped and with its original casing, when its lowercased
+        form is a member of :data:`_KNOWN_FINISH_REASONS`; ``None`` otherwise.
+
+    **This is the Class A value constraint, and membership is the whole control.**
+    Before it, :data:`FINISH_REASON_SOURCES`' ``("status", None)`` row accepted
+    *any* non-empty string at a top-level key — reproduced forwarding a URL with
+    an embedded credential, a 50,000-character string and a clinical sentence
+    verbatim to the billing wire (GAP-2, T-02-08-01). A shape rule would have
+    stopped the leaks someone thought of; a bare bearer token with no whitespace
+    in it would have passed one.
+
+    Every row runs through here, the per-entry ``choices[].finish_reason`` row
+    included, so no row is a weaker gate than another. Comparison is over Python
+    ``str`` code points, lowercased with ``str.lower`` and stripped with
+    ``str.strip`` — the same unit :data:`_MAX_EMITTED_VALUE_CHARS` counts in.
+    """
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    return candidate if candidate.lower() in _KNOWN_FINISH_REASONS else None
+
+
+def _bounded(value: str | None, /) -> str | None:
+    """One emitted value, or ``None`` when it is longer than the cap.
+
+    Args:
+        value: A candidate emitted value, or ``None``.
+
+    Returns:
+        ``value`` unchanged when it is at most :data:`_MAX_EMITTED_VALUE_CHARS`
+        code points long; ``None`` otherwise. **Never a truncation** — see the
+        constant for why a truncated response id is worse than an absent one.
+
+    **This is the Class B value constraint.** ``gen_ai.request.model``,
+    ``gen_ai.response.model``, ``gen_ai.response.id`` and
+    ``gen_ai.operation.name`` carry the provider's or the span's own identifier,
+    which SEM-03 and SEM-06 *require* — an allowlist there would drop every model
+    this SDK has not heard of, which is every new model. So they are bounded by
+    length and by nothing else, and the residual that leaves is T-02-08-07, named
+    in plan 02-08's threat register rather than papered over.
+
+    It is applied to a cleaned finish reason too, so the cap holds on every
+    emitted string without exception even where a closed set already constrains
+    it. That is redundant today — no member of :data:`_KNOWN_FINISH_REASONS` is
+    close to the cap — and it is kept so "no emitted value exceeds the cap" is
+    true by construction rather than by the current contents of a set.
+
+    **One consequence worth stating, because it is not an emit rule.**
+    :func:`_model_candidates` reads :func:`_mapping_model`, so an over-cap model
+    name also stops being a provider-inference candidate. That narrowing cannot
+    produce a *wrong* provider label — it can only cost a
+    :data:`PROVIDER_SENTINEL` — which is the direction :data:`MODEL_PREFIX_PROVIDERS`
+    already declares safe for its own heuristic.
+    """
+    if value is None:
+        return None
+    return value if len(value) <= _MAX_EMITTED_VALUE_CHARS else None
+
+
 def _mapping_model(mapping: _Mapping[str, object] | None, /) -> str | None:
-    """The model name inside a decoded MLflow inputs or outputs mapping, if any."""
+    """The model name inside a decoded MLflow inputs or outputs mapping, if any.
+
+    Bounded by :func:`_bounded`: an over-cap model name in the mapping is
+    reported absent, so ``map_span`` falls through to the shared
+    ``mlflow.llm.model`` fallback rather than carrying it to the wire.
+    """
     if mapping is None:
         return None
     candidate = mapping.get(_MODEL_FIELD)
-    return candidate if isinstance(candidate, str) and candidate else None
+    if not isinstance(candidate, str) or not candidate:
+        return None
+    return _bounded(candidate)
 
 
 def _model_candidates(attributes: _Mapping[str, object], /) -> tuple[str, ...]:
@@ -558,14 +748,23 @@ def _finish_reasons(outputs: _Mapping[str, object] | None, /) -> tuple[str, ...]
     itself is never copied forward. That matters because ``outputs`` holds the
     full serialized provider response with completion text in it (T-02-15); the
     closed emit allowlist is the second, independent guard.
+
+    **Every row runs through :func:`_clean_reason` and :func:`_bounded` (plan
+    02-08).** Reading a named field was never the constraint the module docstring
+    claimed: the ``("status", None)`` row accepted any non-empty string at a
+    top-level key, and forwarded a credential-bearing URL verbatim (GAP-2). A row
+    yielding no *clean* reason now falls through to the next exactly as a row
+    yielding no string always did, and the key is omitted when none matches — so
+    the ``None``-versus-``()`` distinction above is unchanged by the constraint.
     """
     if not outputs:
         return None
     for field, item_field in FINISH_REASON_SOURCES:
         value = outputs.get(field)
         if item_field is None:
-            if isinstance(value, str) and value:
-                return (value,)
+            cleaned = _bounded(_clean_reason(value))
+            if cleaned:
+                return (cleaned,)
             continue
         if not isinstance(value, list):
             continue
@@ -573,8 +772,8 @@ def _finish_reasons(outputs: _Mapping[str, object] | None, /) -> tuple[str, ...]
         for entry in value:
             if not isinstance(entry, dict):
                 continue
-            reason = entry.get(item_field)
-            if isinstance(reason, str) and reason:
+            reason = _bounded(_clean_reason(entry.get(item_field)))
+            if reason:
                 reasons.append(reason)
         if reasons:
             # Order is part of the value: choice *n*'s reason stays at position
@@ -585,11 +784,19 @@ def _finish_reasons(outputs: _Mapping[str, object] | None, /) -> tuple[str, ...]
 
 
 def _response_id(outputs: _Mapping[str, object] | None, /) -> str | None:
-    """The provider's own id for the response — how a disputed charge is traced back."""
+    """The provider's own id for the response — how a disputed charge is traced back.
+
+    Class B, so :func:`_bounded` is the whole constraint: the id is opaque by
+    definition and has no vocabulary to check membership against. Rejected rather
+    than truncated, because a truncated id is a wrong id and a wrong id is worse
+    than an absent one at exactly the moment the id is wanted.
+    """
     if outputs is None:
         return None
     candidate = outputs.get(_RESPONSE_ID_FIELD)
-    return candidate if isinstance(candidate, str) and candidate else None
+    if not isinstance(candidate, str) or not candidate:
+        return None
+    return _bounded(candidate)
 
 
 def _error_type(span: _ReadableSpan, /) -> str | None:
@@ -763,10 +970,36 @@ def operation_for_span(attributes: _Mapping[str, object], /) -> str | None:
 
 
 def _operation(attributes: _Mapping[str, object], /) -> str | None:
-    """The operation to *emit*, which is :func:`operation_for_span` and one omission.
+    """The operation to *emit*, which is :func:`operation_for_span`, bounded, or omitted.
 
     The resolution is not repeated here — there is exactly one precedence rule in
     this package and it lives in :func:`operation_for_span`.
+
+    **Why the emitted operation is bounded (plan 02-08, T-02-08-06).** After plan
+    02-06 promoted ``gen_ai.operation.name`` to the primary identity, the winning
+    branch returns a string the *span* declared, so on any path where
+    :func:`map_span` runs without :func:`eligibility.is_billable_llm_span` having
+    admitted the span first, an unbounded external string reaches a rating
+    dimension. That path is not hypothetical: plan 02-06's own reverse-direction
+    test maps a rejected span on purpose, and Phase 8's fallback is a stated risk
+    in ``STATE.md``. :func:`_bounded` cannot make a wrong operation right; it
+    bounds an unbounded string, which is the disclosure half of the risk.
+
+    **Why a cap and not an allowlist, which would otherwise be the obvious
+    answer.** An operation allowlist inside this module would be a second copy of
+    ``eligibility.BILLABLE_GENAI_OPERATIONS``, which this module cannot import —
+    ``eligibility.py`` imports from here and never the reverse, the one module
+    edge ``STATE.md`` records as breakable by a well-meaning edit. Two tables that
+    happen to agree is the shape GAP-1 punished, and closing GAP-1 by re-opening
+    its cause would be a poor trade. On the intended call path the value is
+    already closed anyway: the gate admits only the four members of
+    ``BILLABLE_GENAI_OPERATIONS``, and since plan 02-06 the gate and the mapper
+    resolve the operation through the same function, so they cannot disagree
+    about what it is. Moving ``BILLABLE_GENAI_OPERATIONS`` into this module so the
+    operation could be membership-constrained is a coherent design and is
+    deliberately not done here — it relocates a published constant that
+    ``eligibility.__all__`` exports and ``tests/unit/test_mlflow_vocabulary_drift.py``
+    imports, which is more change than a gap-closure run should carry.
 
     The remaining truthiness guard is now belt and braces rather than the
     asymmetry it once was. Plan 02-07 routed step 1 of the resolver through the
@@ -778,7 +1011,7 @@ def _operation(attributes: _Mapping[str, object], /) -> str | None:
     absence — and a guard on the emitted value should not depend on a guard two
     functions away for its correctness.
     """
-    return operation_for_span(attributes) or None
+    return _bounded(operation_for_span(attributes) or None)
 
 
 def map_span(
@@ -828,11 +1061,20 @@ def map_span(
     outputs = _spanattrs.decode_mapping(source, _spanattrs.MLFLOW_SPAN_OUTPUTS)
     recorded_model = _spanattrs.decode_str(source, _spanattrs.MLFLOW_LLM_MODEL)
 
-    request_model = _mapping_model(inputs) or recorded_model
+    # ``_bounded`` is applied twice on each of these two lines, and the second
+    # application is not redundant. ``_mapping_model`` bounds the mapping-derived
+    # candidate, so an over-cap ``inputs["model"]`` falls through to the shared
+    # fallback rather than reaching the wire. The fallback itself —
+    # ``mlflow.llm.model``, read through ``decode_str`` — never passes through
+    # ``_mapping_model`` at all, so without the outer call a span carrying no
+    # ``mlflow.spanInputs`` and a 300-character ``mlflow.llm.model`` would emit a
+    # 300-character request model. Class B is bounded at every source, not at
+    # most of them.
+    request_model = _bounded(_mapping_model(inputs) or recorded_model)
     if request_model:
         attributes[GEN_AI_REQUEST_MODEL] = request_model
 
-    response_model = _mapping_model(outputs) or recorded_model
+    response_model = _bounded(_mapping_model(outputs) or recorded_model)
     if response_model:
         attributes[GEN_AI_RESPONSE_MODEL] = response_model
 
@@ -905,7 +1147,18 @@ def map_span(
     end_time_ns = span.end_time if span.end_time is not None else start_time_ns
 
     return MappedSpan(
-        attributes=_types.MappingProxyType(attributes),
+        # D-04 applied rather than merely declared (WR-03, T-02-08-04). Before
+        # this filter, ``EMITTED_ATTRIBUTE_KEYS`` was consulted by nothing at
+        # runtime: the closed allowlist was a naming convention plus a
+        # fixture-driven test, and a fixture-driven test can only say that *the
+        # spans in the sweep* emit no stray key. That is a statement about the
+        # fixtures. This is a statement about the function — a key no constant
+        # sanctions cannot reach the wire even from a code path no fixture
+        # exercises, which is the "leaks nobody thought of" case the module
+        # docstring already claims the allowlist structurally prevents.
+        attributes=_types.MappingProxyType(
+            {key: value for key, value in attributes.items() if key in EMITTED_ATTRIBUTE_KEYS}
+        ),
         kind=_SpanKind.CLIENT,
         trace_id=format(context.trace_id, "032x") if context is not None else _ABSENT_TRACE_ID,
         span_id=format(context.span_id, "016x") if context is not None else _ABSENT_SPAN_ID,

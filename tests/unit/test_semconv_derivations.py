@@ -31,13 +31,15 @@ the call site — which is also the wire shape MLflow really produces.
 """
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 import pytest
 from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.trace.status import Status, StatusCode
 from opentelemetry.util.types import AttributeValue
 
+from revenium_mlflow.tracing import semconv
 from revenium_mlflow.tracing.semconv import map_span
 from tests.fixtures.spans import build_readable_span, error_span, mlflow_chat_model_span
 
@@ -54,6 +56,62 @@ _DURATION_NS = 45980000
 #: The derivations under test do not read it; a span without it would still be
 #: mapped, but it would not be a span this SDK would ever see.
 _USAGE: Mapping[str, int] = {"input_tokens": 11, "output_tokens": 7}
+
+#: The finish reasons this file expects ``semconv`` to accept, as a literal.
+#: Compared set-equal to ``semconv._KNOWN_FINISH_REASONS`` below, and never
+#: imported from it: a test that read the module's own set would agree with every
+#: future edit to the set, and the set is exactly what must not change unnoticed.
+#: Grouped by the provider vocabulary each member came from, so a drift failure
+#: names a vocabulary rather than a bare string.
+_EXPECTED_FINISH_REASONS = frozenset(
+    {
+        # OpenAI chat completions.
+        "stop",
+        "length",
+        "tool_calls",
+        "content_filter",
+        "function_call",
+        # OpenAI Responses.
+        "completed",
+        "incomplete",
+        "failed",
+        "cancelled",
+        "in_progress",
+        # Anthropic.
+        "end_turn",
+        "max_tokens",
+        "stop_sequence",
+        "pause_turn",
+        "refusal",
+    }
+)
+
+#: The character cap this file expects, held as a literal for the same reason.
+#: It is used to *build* the boundary values below, so if the module's figure
+#: ever moves in either direction the boundary tests red: raise the module cap
+#: and the 65-character value stops being omitted; lower it and the 64-character
+#: value stops being emitted.
+_MAX_EMITTED_VALUE_CHARS = 64
+
+#: The GAP-2 reproductions, transcribed from 02-VERIFICATION.md so the tests
+#: below run against the recorded evidence rather than a paraphrase of it. The
+#: credential is synthetic and always was — no live key appears in this file.
+_CREDENTIAL_STATUS = "https://user:rev_sk_SUPERSECRET@api.internal.example.com/v1 failed: 401"
+_CREDENTIAL_SUBSTRING = "rev_sk_SUPERSECRET"
+_CLINICAL_STATUS = "The patient's diagnosis is terminal cancer."
+
+
+def _rendered(value: Any) -> str:
+    """One attribute value as text, so a tuple's elements are searched too.
+
+    ``gen_ai.response.finish_reasons`` is a tuple of strings. A substring test
+    against the tuple object would still work through ``repr``, but saying so
+    explicitly keeps the guard from depending on a repr detail — the same
+    reasoning ``tests/unit/test_semconv_allowlist.py`` records for its own copy.
+    """
+    if isinstance(value, (tuple, list)):
+        return "\n".join(str(item) for item in value)
+    return str(value)
 
 
 def _mlflow_span(
@@ -253,6 +311,270 @@ def test_the_response_id_is_read_from_the_outputs_id() -> None:
         }
     )
     assert map_span(span).attributes["gen_ai.response.id"] == "chatcmpl-9x7Qk1"
+
+
+# --- Class A: the finish-reason value constraint (plan 02-08, GAP-2) --------
+#
+# Three reproductions from 02-VERIFICATION.md, each of which reached
+# ``gen_ai.response.finish_reasons`` verbatim against the shipped tree: a
+# credential embedded in a URL, a 50,000-character string, and a sentence of
+# clinical content. All three are non-members of ``_KNOWN_FINISH_REASONS``, so
+# one membership test closes all three — which is why the human answering the
+# plan's checkpoint chose an enum over a shape rule.
+
+
+def test_the_finish_reason_allowlist_matches_this_files_independent_copy() -> None:
+    """The literal comparison — the assertion a silent widening cannot agree with.
+
+    Widening ``_KNOWN_FINISH_REASONS`` changes what reaches the billing wire, and
+    the change is not recoverable: a reason dropped at emit time was never sent,
+    so spans before and after carry different value populations for one rated
+    key. A test that imported the set would agree with any such edit.
+    """
+    ours = set(semconv._KNOWN_FINISH_REASONS)
+    theirs = set(_EXPECTED_FINISH_REASONS)
+    assert ours == theirs, (
+        "_KNOWN_FINISH_REASONS no longer matches this file's independent copy. "
+        f"Present in the module and not here: {sorted(ours - theirs)}. "
+        f"Present here and not in the module: {sorted(theirs - ours)}."
+    )
+
+
+def test_a_free_text_status_is_not_a_finish_reason() -> None:
+    """A sentence at ``outputs["status"]`` is response-body text, not a reason.
+
+    ``mlflow.spanOutputs`` on a ``@mlflow.trace``-decorated function is that
+    function's serialized return value — an arbitrary application dict, not an
+    OpenAI Responses enum — so the ``("status", None)`` row was reading free text
+    one function away from ``_error_type``, which refuses to read the status
+    description precisely *because* it is free text.
+    """
+    span = _mlflow_span(
+        {
+            "mlflow.spanType": "CHAT_MODEL",
+            "mlflow.llm.model": "gpt-4o",
+            "mlflow.chat.tokenUsage": dict(_USAGE),
+            "mlflow.spanOutputs": {"status": _CLINICAL_STATUS},
+        }
+    )
+    assert "gen_ai.response.finish_reasons" not in map_span(span).attributes
+
+
+def test_a_credential_bearing_status_reaches_no_emitted_value() -> None:
+    """T-02-08-01, asserted across every emitted value rather than one key.
+
+    Naming ``gen_ai.response.finish_reasons`` alone would pass just as well if
+    the constraint moved the credential to some other key. The sweep is over the
+    whole mapping, tuple elements included, because the requirement is that the
+    credential leaves the process nowhere — CLAUDE.md's redaction rule is about
+    the value, not about a key.
+    """
+    span = _mlflow_span(
+        {
+            "mlflow.spanType": "CHAT_MODEL",
+            "mlflow.llm.model": "gpt-4o",
+            "mlflow.chat.tokenUsage": dict(_USAGE),
+            "mlflow.spanOutputs": {"status": _CREDENTIAL_STATUS},
+        }
+    )
+    offenders = sorted(
+        f"{key}={value!r}"
+        for key, value in map_span(span).attributes.items()
+        if _CREDENTIAL_SUBSTRING in _rendered(value)
+    )
+    assert offenders == [], offenders
+
+
+def test_a_fifty_thousand_character_status_emits_no_finish_reason_key() -> None:
+    """The unbounded-length reproduction, and it is absent rather than truncated.
+
+    Absent, not an empty tuple and not a shortened string: an empty tuple ships
+    as a present key carrying no answer, and a truncated one would ship a reason
+    the provider never reported.
+    """
+    span = _mlflow_span(
+        {
+            "mlflow.spanType": "CHAT_MODEL",
+            "mlflow.llm.model": "gpt-4o",
+            "mlflow.chat.tokenUsage": dict(_USAGE),
+            "mlflow.spanOutputs": {"status": "A" * 50000},
+        }
+    )
+    assert "gen_ai.response.finish_reasons" not in map_span(span).attributes
+
+
+# --- Class B: the character cap, asserted from both sides (SEM-06 encoding) -
+#
+# Every case below asserts the boundary twice: a value at exactly the cap is
+# emitted *and* carries its full value, and a value one code point longer is
+# absent. Without the at-cap half a blanket drop would satisfy every one of them,
+# which is the same failure mode the recorded-zero token test exists to close.
+
+
+def _inputs_model_span(value: str) -> ReadableSpan:
+    """A span whose only model name is ``inputs["model"]``.
+
+    No ``mlflow.llm.model``, deliberately: with the shared fallback present, an
+    over-cap inputs model would fall through to it and the request-model key
+    would be filled from another source — a correct behaviour that would make
+    this test assert nothing about the cap.
+    """
+    return _mlflow_span(
+        {
+            "mlflow.spanType": "CHAT_MODEL",
+            "mlflow.chat.tokenUsage": dict(_USAGE),
+            "mlflow.spanInputs": {"model": value},
+        }
+    )
+
+
+def _outputs_model_span(value: str) -> ReadableSpan:
+    """The same shape one field over, for the response model."""
+    return _mlflow_span(
+        {
+            "mlflow.spanType": "CHAT_MODEL",
+            "mlflow.chat.tokenUsage": dict(_USAGE),
+            "mlflow.spanOutputs": {"model": value},
+        }
+    )
+
+
+def _recorded_model_span(value: str) -> ReadableSpan:
+    """A span whose only model name is the shared ``mlflow.llm.model`` fallback.
+
+    This source never passes through ``_mapping_model``, so it is the one Class B
+    path a cap applied only inside that helper would miss entirely. It fills both
+    model keys, which is why it appears twice in the parametrization.
+    """
+    return _mlflow_span(
+        {
+            "mlflow.spanType": "CHAT_MODEL",
+            "mlflow.chat.tokenUsage": dict(_USAGE),
+            "mlflow.llm.model": value,
+        }
+    )
+
+
+def _declared_operation_span(value: str) -> ReadableSpan:
+    """A Path A span declaring its own operation, with bare attributes.
+
+    Bare rather than JSON-encoded because these are real OpenTelemetry attributes
+    written by a bridged instrumentor that never heard of MLflow. It carries no
+    ``mlflow.spanType``, so nothing rescues the key when the cap rejects the
+    declared value.
+    """
+    return build_readable_span(
+        attributes={"gen_ai.operation.name": value, "gen_ai.usage.input_tokens": 5},
+        start_time_ns=_START_NS,
+        end_time_ns=_END_NS,
+    )
+
+
+#: Every Class B key, paired with a span factory that makes the named field the
+#: *only* source for it. ``gen_ai.response.id`` has its own test above, which
+#: additionally asserts the at-cap value is emitted whole rather than shortened.
+_CLASS_B_CASES: tuple[tuple[str, Callable[[str], ReadableSpan]], ...] = (
+    ("gen_ai.request.model", _inputs_model_span),
+    ("gen_ai.response.model", _outputs_model_span),
+    ("gen_ai.request.model", _recorded_model_span),
+    ("gen_ai.response.model", _recorded_model_span),
+    ("gen_ai.operation.name", _declared_operation_span),
+)
+
+
+def test_an_over_length_response_id_is_omitted_rather_than_truncated() -> None:
+    """A truncated response id is a *wrong* response id, which is the worse failure.
+
+    The id is how a disputed charge is traced back to a call in the provider's own
+    console. An absent id costs the customer that trace; a plausible-but-wrong one
+    costs them the trace *and* sends them looking for a call that does not exist.
+    So the over-cap value is rejected outright — and the at-cap assertion in the
+    same test is what proves the rejection is a boundary rather than a blanket
+    drop, and that the value that survives survives whole.
+    """
+    over = _mlflow_span(
+        {
+            "mlflow.spanType": "CHAT_MODEL",
+            "mlflow.llm.model": "gpt-4o",
+            "mlflow.chat.tokenUsage": dict(_USAGE),
+            "mlflow.spanOutputs": {"id": "x" * (_MAX_EMITTED_VALUE_CHARS + 1)},
+        }
+    )
+    at_cap = _mlflow_span(
+        {
+            "mlflow.spanType": "CHAT_MODEL",
+            "mlflow.llm.model": "gpt-4o",
+            "mlflow.chat.tokenUsage": dict(_USAGE),
+            "mlflow.spanOutputs": {"id": "x" * _MAX_EMITTED_VALUE_CHARS},
+        }
+    )
+    assert "gen_ai.response.id" not in map_span(over).attributes
+    assert map_span(at_cap).attributes["gen_ai.response.id"] == "x" * _MAX_EMITTED_VALUE_CHARS
+
+
+@pytest.mark.parametrize(("key", "build"), _CLASS_B_CASES)
+def test_every_class_b_key_is_omitted_one_character_over_the_cap(
+    key: str, build: Callable[[str], ReadableSpan]
+) -> None:
+    """The remaining three Class B keys, each bounded at its own source.
+
+    Class B keys carry the provider's or the span's own identifier and are
+    constrained by length and by nothing else — an allowlist would drop every
+    model this SDK has not heard of, which is every new model. Length is
+    therefore the whole control on these keys, so the boundary is asserted rather
+    than assumed, on both sides and at every source that can fill the key.
+    """
+    at_cap_value = "c" * _MAX_EMITTED_VALUE_CHARS
+    over_value = "c" * (_MAX_EMITTED_VALUE_CHARS + 1)
+
+    assert map_span(build(at_cap_value)).attributes.get(key) == at_cap_value
+    assert key not in map_span(build(over_value)).attributes
+
+
+# --- Token counts on the emit path (WR-02, T-02-08-03) ---------------------
+
+
+def test_a_negative_token_count_reaches_no_emitted_attribute() -> None:
+    """``-7`` is not a measurement; it is a broken integration.
+
+    ``_spanattrs.is_positive_int`` already rejects negatives for the gate, and
+    ``tests/unit/test_spanattrs.py`` asserts it does. The emit path applied no
+    equivalent rule, so a span admitted on a positive ``input_tokens`` carried a
+    negative ``output_tokens`` to the wire — landing as a silent credit or a
+    corrupted total depending on backend arithmetic.
+    """
+    span = _mlflow_span(
+        {
+            "mlflow.spanType": "CHAT_MODEL",
+            "mlflow.llm.model": "gpt-4o",
+            "mlflow.chat.tokenUsage": {"input_tokens": 5, "output_tokens": -7},
+        }
+    )
+    attributes = map_span(span).attributes
+    assert "gen_ai.usage.output_tokens" not in attributes
+    # Non-vacuity: the span really was mapped, and the sibling count survived.
+    assert attributes["gen_ai.usage.input_tokens"] == 5
+
+
+def test_a_recorded_zero_token_count_still_reaches_the_wire() -> None:
+    """The other half of the same rule, so neither can be satisfied by a blanket drop.
+
+    A recorded zero is a measurable fact: the provider reported no tokens for
+    that field, and this SDK emits what MLflow recorded and computes nothing.
+    Dropping it would be the easy over-reach that makes the negative-count test
+    above pass for the wrong reason.
+    """
+    span = _mlflow_span(
+        {
+            "mlflow.spanType": "CHAT_MODEL",
+            "mlflow.llm.model": "gpt-4o",
+            "mlflow.chat.tokenUsage": {"input_tokens": 0, "output_tokens": 0},
+        }
+    )
+    emitted = map_span(span).attributes["gen_ai.usage.input_tokens"]
+    assert emitted == 0
+    # ``isinstance(True, int)`` is true, so the zero must be proven a real int.
+    assert type(emitted) is int
 
 
 # --- Error information (SEM-06, D-C7) --------------------------------------
