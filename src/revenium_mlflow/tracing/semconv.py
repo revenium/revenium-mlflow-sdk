@@ -73,6 +73,7 @@ from typing import Final as _Final
 
 from opentelemetry.sdk.trace import ReadableSpan as _ReadableSpan
 from opentelemetry.trace import SpanKind as _SpanKind
+from opentelemetry.trace import StatusCode as _StatusCode
 from opentelemetry.util.types import AttributeValue as _AttributeValue
 
 from . import _spanattrs
@@ -82,6 +83,8 @@ __all__ = [
     "DEPLOYMENT_ENVIRONMENT_NAME",
     "EMITTED_ATTRIBUTE_KEYS",
     "ERROR_TYPE",
+    "ERROR_TYPE_UNKNOWN",
+    "FINISH_REASON_SOURCES",
     "GEN_AI_OPERATION_NAME",
     "GEN_AI_PROVIDER_NAME",
     "GEN_AI_REQUEST_MODEL",
@@ -161,11 +164,35 @@ GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS: _Final[str] = "gen_ai.usage.cache_crea
 #: filesystem paths; the class name is the whole useful signal without any of it.
 ERROR_TYPE: _Final[str] = "error.type"
 
+#: OpenTelemetry's own value for an error whose type could not be determined.
+#: Carried when the span's status is ``ERROR`` but no exception event names a
+#: class. The alternative — omitting :data:`ERROR_TYPE` — would lose the fact
+#: that the call failed at all, and the span would rate as a clean completion.
+#: The remaining alternative, parsing the status description for a type, reads
+#: free text written by customer code, which is the exact surface the whole
+#: error derivation exists to avoid. Whether the Revenium backend prefers
+#: ``_OTHER`` or an absent key for this case is unresolved (SEM-06 probe edge);
+#: this is the OpenTelemetry-defined answer, which is the defensible default.
+ERROR_TYPE_UNKNOWN: _Final[str] = "_OTHER"
+
 #: The deployment environment, supplied by the caller (D-C6). Phase 4 sources it
 #: from configuration; this module takes it as an argument.
+#:
+#: **Assumption A1, stated plainly: no document in this repository names the key
+#: the Revenium backend reads for deployment environment.**
+#: ``BACKEND-CONTRACT.md`` enumerates the thirty recognized ``revenium.*`` keys
+#: and the ``gen_ai.*`` token and provider spellings, and neither list contains
+#: this dimension. This is therefore the OpenTelemetry semantic-convention
+#: spelling, chosen as the defensible default, with confirmation carried to the
+#: end-of-phase check with the backend owner. A wrong spelling is not loud: the
+#: backend drops an unrecognized attribute silently, so environment would simply
+#: be missing from every report with no error on either side.
 DEPLOYMENT_ENVIRONMENT_NAME: _Final[str] = "deployment.environment.name"
 
-#: The cloud region, supplied by the caller (D-C6).
+#: The cloud region, supplied by the caller (D-C6). Assumption A1 applies to this
+#: key exactly as it does to :data:`DEPLOYMENT_ENVIRONMENT_NAME` above — an
+#: OpenTelemetry spelling chosen in the absence of any Revenium source, pending
+#: the same end-of-phase confirmation.
 CLOUD_REGION: _Final[str] = "cloud.region"
 
 #: The closed set (D-04). An allowlist rather than the denylist first proposed,
@@ -285,6 +312,36 @@ MODEL_PREFIX_PROVIDERS: _Final[tuple[tuple[str, str], ...]] = (
     ("o3-", "openai"),
 )
 
+#: Where a finish reason lives in a decoded ``mlflow.spanOutputs``, in order,
+#: first match wins. Each row is a top-level field and, when that field holds a
+#: list of entries, the per-entry field to read from it:
+#:
+#: 1. ``choices[].finish_reason`` — the OpenAI chat shape.
+#: 2. ``status`` — the OpenAI Responses shape, which carries no ``choices``.
+#: 3. ``stop_reason`` — the Anthropic shape.
+#:
+#: **This table is the deliberate, narrow exception recorded in plan 02-04's
+#: scope-reading section, and the reason it is not D-01's prohibition.** D-01
+#: forbids per-provider knowledge of raw response shapes for *cache tokens*,
+#: because that knowledge would drift independently of MLflow's own
+#: normalization. There is no normalization to drift against here:
+#: ``_translate_universal_attributes`` produces no finish reason at all, and
+#: MLflow emits ``gen_ai.response.finish_reasons`` through the OpenAI converter
+#: alone — ``extract_response_attrs`` is absent from the Anthropic, Gemini and
+#: Bedrock converters. The alternative to this table is not emitting SEM-06's
+#: finish reason for anyone. It therefore stays small: three known shapes and
+#: nothing more.
+#:
+#: A consequence worth stating, because it looks like a bug the first time it is
+#: seen: an A/B of this mapper against MLflow's translator on an *Anthropic*
+#: fixture shows a finish reason here and none there. That difference is
+#: MLflow's behaviour, not a defect in either.
+FINISH_REASON_SOURCES: _Final[tuple[tuple[str, str | None], ...]] = (
+    ("choices", "finish_reason"),
+    ("status", None),
+    ("stop_reason", None),
+)
+
 #: The value the SDK claims at **resource** level (D-15, SEM-02).
 #:
 #: Its only job is to satisfy ``GenAISemanticConventionMapper.canHandle``, which
@@ -337,6 +394,22 @@ _TOKEN_FIELD_TO_KEY: _Final[tuple[tuple[str, str], ...]] = (
     ("cache_read_input_tokens", GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS),
     ("cache_creation_input_tokens", GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS),
 )
+
+#: The model field, spelled once. It is read out of the decoded MLflow inputs
+#: mapping and out of the decoded outputs mapping, and those two reads are what
+#: make :data:`GEN_AI_REQUEST_MODEL` and :data:`GEN_AI_RESPONSE_MODEL` two
+#: different answers rather than one value written twice (SEM-03).
+_MODEL_FIELD: _Final[str] = "model"
+
+#: The provider's response id, in the decoded outputs mapping.
+_RESPONSE_ID_FIELD: _Final[str] = "id"
+
+#: The OpenTelemetry exception event, and the **only** attribute of it this
+#: module ever reads. Both spelled once, because the value of the control is
+#: that the read is narrow — a second read added later would be one line and
+#: would not look like a disclosure.
+_EXCEPTION_EVENT_NAME: _Final[str] = "exception"
+_EXCEPTION_TYPE_ATTRIBUTE: _Final[str] = "exception.type"
 
 #: OpenTelemetry's all-zero invalid ids, used when a span arrives with no
 #: context at all. A zero id can never be mistaken for a real one, and the
@@ -437,6 +510,95 @@ def _model_name(attributes: _Mapping[str, object], /) -> str | None:
         return None
     candidate = inputs.get("model")
     return candidate if isinstance(candidate, str) and candidate else None
+
+
+def _mapping_model(mapping: _Mapping[str, object] | None, /) -> str | None:
+    """The model name inside a decoded MLflow inputs or outputs mapping, if any."""
+    if mapping is None:
+        return None
+    candidate = mapping.get(_MODEL_FIELD)
+    return candidate if isinstance(candidate, str) and candidate else None
+
+
+def _finish_reasons(outputs: _Mapping[str, object] | None, /) -> tuple[str, ...] | None:
+    """Why generation stopped, as a tuple of strings, or ``None`` to omit the key.
+
+    ``None`` and ``()`` are different answers and the distinction is the point.
+    An empty tuple ships as an array with no elements — a present key carrying no
+    value, which reads downstream as "the provider reported no reason" rather
+    than as "this SDK did not recognise the shape". Only a row that yields at
+    least one non-empty string counts as a match; anything else falls through to
+    the next row and then to ``None``.
+
+    Nothing but named string fields is read out of ``outputs``, and the mapping
+    itself is never copied forward. That matters because ``outputs`` holds the
+    full serialized provider response with completion text in it (T-02-15); the
+    closed emit allowlist is the second, independent guard.
+    """
+    if not outputs:
+        return None
+    for field, item_field in FINISH_REASON_SOURCES:
+        value = outputs.get(field)
+        if item_field is None:
+            if isinstance(value, str) and value:
+                return (value,)
+            continue
+        if not isinstance(value, list):
+            continue
+        reasons: list[str] = []
+        for entry in value:
+            if not isinstance(entry, dict):
+                continue
+            reason = entry.get(item_field)
+            if isinstance(reason, str) and reason:
+                reasons.append(reason)
+        if reasons:
+            # Order is part of the value: choice *n*'s reason stays at position
+            # *n*, so a two-choice response whose first choice hit the token
+            # limit cannot read as one that stopped cleanly.
+            return tuple(reasons)
+    return None
+
+
+def _response_id(outputs: _Mapping[str, object] | None, /) -> str | None:
+    """The provider's own id for the response — how a disputed charge is traced back."""
+    if outputs is None:
+        return None
+    candidate = outputs.get(_RESPONSE_ID_FIELD)
+    return candidate if isinstance(candidate, str) and candidate else None
+
+
+def _error_type(span: _ReadableSpan, /) -> str | None:
+    """The class of a failure, and nothing else about it (SEM-06, D-C7).
+
+    **This function is a security control, and the narrowness is the control.**
+    An exception raised inside an MLflow span was measured carrying a planted
+    marker verbatim in *both* the span's status description and the exception
+    event's ``exception.message`` attribute, alongside an ``exception.stacktrace``
+    attribute holding absolute filesystem paths — usernames and directory layout
+    included. All of it would reach Revenium if it were forwarded (T-02-01,
+    T-02-02). The exception *type* is a class name from the application's own
+    code and carries no payload, which is why SEM-06's "error information" is
+    read here as the class of failure and never the text of it.
+
+    So: exactly one field is read, ``exception.type`` off the ``exception``
+    event. The status description is never read — it is free text — and neither
+    is the event's message or stacktrace. An ERROR span whose event names no
+    type gets :data:`ERROR_TYPE_UNKNOWN` rather than losing the failure.
+
+    Returns ``None`` for any status other than ``ERROR``, which omits the key:
+    ``_OTHER`` on every successful span would put the error rate at 100%.
+    """
+    if span.status.status_code is not _StatusCode.ERROR:
+        return None
+    for event in span.events:
+        if event.name != _EXCEPTION_EVENT_NAME:
+            continue
+        attributes = event.attributes or {}
+        recorded = attributes.get(_EXCEPTION_TYPE_ATTRIBUTE)
+        if isinstance(recorded, str) and recorded:
+            return recorded
+    return ERROR_TYPE_UNKNOWN
 
 
 def infer_provider(span: _ReadableSpan, /) -> str:
@@ -548,9 +710,42 @@ def map_span(
     if operation is not None:
         attributes[GEN_AI_OPERATION_NAME] = operation
 
-    request_model = _spanattrs.decode_str(source, _spanattrs.MLFLOW_LLM_MODEL)
+    # SEM-03, the provenance split. ``mlflow.llm.model`` is one attribute whose
+    # *meaning* differs by integration: it is the **response** model on the
+    # OpenAI path — MLflow prioritizes it from the response "to ensure accuracy
+    # for providers like Azure OpenAI where the request 'model' parameter may
+    # contain deployment name instead of the actual model name"
+    # (``mlflow/openai/utils/chat_schema.py:35-39``) — and the **request** model
+    # on the Anthropic path (``mlflow/anthropic/autolog.py:132``). MLflow's own
+    # translator maps it unconditionally to the request key
+    # (``translator.py:108-110``), which is therefore wrong for OpenAI, and
+    # criterion 3 asks for both keys, so this SDK cannot inherit that
+    # conflation (T-02-16). Two sources with a shared fallback is correct on
+    # both integrations and degrades to MLflow's own behaviour — the same value
+    # under both keys — only when inputs and outputs are both absent.
+    inputs = _spanattrs.decode_mapping(source, _spanattrs.MLFLOW_SPAN_INPUTS)
+    outputs = _spanattrs.decode_mapping(source, _spanattrs.MLFLOW_SPAN_OUTPUTS)
+    recorded_model = _spanattrs.decode_str(source, _spanattrs.MLFLOW_LLM_MODEL)
+
+    request_model = _mapping_model(inputs) or recorded_model
     if request_model:
         attributes[GEN_AI_REQUEST_MODEL] = request_model
+
+    response_model = _mapping_model(outputs) or recorded_model
+    if response_model:
+        attributes[GEN_AI_RESPONSE_MODEL] = response_model
+
+    response_id = _response_id(outputs)
+    if response_id:
+        attributes[GEN_AI_RESPONSE_ID] = response_id
+
+    finish_reasons = _finish_reasons(outputs)
+    if finish_reasons:
+        attributes[GEN_AI_RESPONSE_FINISH_REASONS] = finish_reasons
+
+    error_type = _error_type(span)
+    if error_type:
+        attributes[ERROR_TYPE] = error_type
 
     # D-02: each token count gets **exactly one** spelling, which is the opposite
     # call to the provider's two spellings below, and the asymmetry is deliberate
@@ -588,6 +783,14 @@ def map_span(
 
     context = span.context
     parent = span.parent
+    # SEM-08: read off the span's own fields, which are already integer
+    # nanoseconds. ``mlflow.spanStartTimeNs`` is **never** consulted, and the
+    # reason is that it looks like the right source and is not: it has exactly
+    # one setter in MLflow (``mlflow/tracing/provider.py:345``, one code path)
+    # and a real captured ``CHAT_MODEL`` span does not carry it. A mapper
+    # depending on it would produce correct timings against a fixture that sets
+    # it and no timings at all in production — the failure that only appears
+    # after the tests are green.
     start_time_ns = span.start_time if span.start_time is not None else 0
     # A span whose end time is unset is measured as zero-duration rather than
     # negative. Whether any MLflow path produces one is unestablished (SEM-08),
