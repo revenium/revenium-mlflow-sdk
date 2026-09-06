@@ -46,6 +46,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
     InMemorySpanExporter as _InMemorySpanExporter,
 )
 from opentelemetry.trace import Tracer as _Tracer
+from opentelemetry.trace import set_span_in_context as _set_span_in_context
 from opentelemetry.util.types import AttributeValue as _AttributeValue
 
 from revenium_mlflow.attributes import (
@@ -204,6 +205,44 @@ def revenium_attributes(span: _ReadableSpan, /) -> dict[str, _AttributeValue]:
         for key, value in (span.attributes or {}).items()
         if key.startswith(_REVENIUM_PREFIX)
     }
+
+
+def start_child_span(
+    tracer: _Tracer,
+    parent: _Span,
+    name: str,
+    /,
+    *,
+    attributes: _Mapping[str, _AttributeValue] | None = None,
+) -> _Span:
+    """Start ``name`` as a child of ``parent``, by explicit context.
+
+    Args:
+        tracer: The tracer from :func:`build_collecting_tracer`.
+        parent: The live parent span. It does not have to be current, and for
+            ATTR-03's controls it deliberately is not.
+        name: The child span's name.
+        attributes: Creation-time attributes, which is the only point at which
+            the ``declared-only`` stamp-time gate can see them.
+
+    Returns:
+        The started child. The caller ends it.
+
+    **The parent is passed as an argument and turned into a ``Context`` here,
+    rather than being made the ambient current span with ``use_span``.** That
+    separation is the whole reason ATTR-03 can be tested at all. Parenting and
+    attribution are two different pieces of state that both happen to ride on
+    ``contextvars``, and ``use_span`` couples them: making a span current
+    installs an OTel ``Context`` for the duration of a ``with`` block, so the
+    parent-child relationship and the ``attribution()`` scope would be forced to
+    nest the same way. Passing the parent explicitly lets a child be created
+    inside a scope its parent was created outside of — which is the one shape
+    that tells per-span stamping apart from parent-attribute inheritance.
+
+    Phase 3's single parenting convention, here rather than in a test module for
+    the single-owner reason at the top of this file.
+    """
+    return tracer.start_span(name, context=_set_span_in_context(parent), attributes=attributes)
 
 
 def stamped(supplied: _Mapping[str, _AttributeValue], /) -> dict[str, _AttributeValue]:
