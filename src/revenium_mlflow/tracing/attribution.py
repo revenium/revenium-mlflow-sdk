@@ -1,9 +1,13 @@
 """The attribution scope: 21 explicit keyword parameters, and why (D-03, ATTR-01).
 
 :func:`attribution` is a context manager that sets Revenium attribution for the
-spans created inside it. Phase 1 defines its signature and nothing else; the
-``ContextVar`` that carries the values, the client-side cap validation, and the
-concurrency behaviour are ATTR-01 through ATTR-11, in Phase 3.
+spans created inside it. Phase 1 published the signature; plan 03-01 filled in
+the body. The ``ContextVar`` the values live in belongs to
+:mod:`revenium_mlflow.tracing._scope`, which is the single module allowed to
+declare one, and it is read back by
+:class:`~revenium_mlflow.tracing.processor.ReveniumAttributionSpanProcessor` in
+``on_start``. The client-side cap validation (ATTR-09) is still ahead, in plan
+03-04.
 
 **Why 21 named parameters instead of ``**kwargs`` or a TypedDict.** Revenium's
 ingest silently *drops* an attribute key it does not recognise and silently
@@ -32,14 +36,9 @@ than hardcoding it, so the constants and this signature cannot drift apart.
 import contextlib
 from collections.abc import Iterator
 
-__all__ = ["attribution"]
+from . import _scope
 
-_PHASE_3 = (
-    "not implemented until Phase 3 (Attribution Context and Span Processor). "
-    "Phase 1 publishes this signature so callers and type checkers can be written "
-    "against it; entering the scope raises rather than yielding silently, because "
-    "a no-op attribution scope would export spans that look attributed and are not."
-)
+__all__ = ["attribution"]
 
 
 @contextlib.contextmanager
@@ -103,17 +102,47 @@ def attribution(
     Yields:
         Nothing. The scope is the value.
 
-    Raises:
-        NotImplementedError: On entry, in Phase 1. Constructing the context
-            manager is free — the generator body does not run until ``__enter__``
-            — so a caller can build one and a type checker can check one without
-            reaching unimplemented code.
+    **The scope is restored on the way out however the body ends, and that is
+    what the ``finally`` is for (ATTR-04, T-03-02).** A scope that restored only
+    on the normal path would leave a failed request's attribution installed for
+    whatever ran next on the same task or worker thread, which on a reused worker
+    means one customer's traffic billed to another — a leak that grows quieter
+    the more reliable the surrounding code is. The caller's exception propagates
+    unchanged, as the same object: nothing here catches it, and nothing here
+    raises an exception of its own that would replace it and take its stack.
+
+    **A nested scope merges over the enclosing one rather than replacing it**, so
+    an inner ``attribution(product_name=...)`` keeps the outer scope's subscriber.
+    The merge is copy-on-write — see :mod:`revenium_mlflow.tracing._scope` for why
+    mutating the enclosing snapshot in place would be a cross-tenant failure
+    rather than a lost write.
     """
-    raise NotImplementedError(f"attribution() is {_PHASE_3}")
-    # Unreachable, and deliberately kept: the ``yield`` is what makes this a
-    # generator, which is what makes the ``@contextmanager`` decorator produce a
-    # context manager whose construction is free and whose *entry* raises. The
-    # narrow ignore is preferred over restructuring, because every alternative
-    # that satisfies ``warn_unreachable`` (a helper that always raises but is
-    # annotated as returning) hides the raise from the type checker instead.
-    yield  # type: ignore[unreachable]
+    token = _scope.enter(
+        {
+            "organization_name": organization_name,
+            "product_name": product_name,
+            "subscription_id": subscription_id,
+            "subscriber_id": subscriber_id,
+            "subscriber_email": subscriber_email,
+            "agent_name": agent_name,
+            "task_type": task_type,
+            "trace_type": trace_type,
+            "trace_name": trace_name,
+            "transaction_name": transaction_name,
+            "job_id": job_id,
+            "job_name": job_name,
+            "job_type": job_type,
+            "job_version": job_version,
+            "squad_id": squad_id,
+            "squad_name": squad_name,
+            "squad_role": squad_role,
+            "operation_subtype": operation_subtype,
+            "retry_number": retry_number,
+            "request_stream": request_stream,
+            "middleware_source": middleware_source,
+        }
+    )
+    try:
+        yield
+    finally:
+        _scope.leave(token)
