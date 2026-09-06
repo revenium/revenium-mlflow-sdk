@@ -177,5 +177,25 @@ def resolve_attributes(snapshot: AttributionSnapshot, /) -> dict[str, Attributio
             names are keyword-only, and
             ``test_attribution_parameter_names_derive_from_the_constants`` goes
             red before this could.
+
+    **Values are carried in their declared types, and the absence of a
+    conversion here is the decision rather than an omission.** Nineteen of the
+    twenty-one keys are ``str``; ``retry_number`` is ``int`` and
+    ``request_stream`` is ``bool``. All three are natively typed OpenTelemetry
+    attribute values, so this function hands them to ``span.set_attribute``
+    unchanged. Stamping ``retry_number`` as ``"1"`` would repeat, on the
+    attribution half of the SDK, the exact defect ``mlflow.tracing.configure``
+    was rejected for — values arriving in a shape the backend drops or
+    mis-stores — and Phase 2 already settled the same question for token counts
+    (SEM-04). Neither key appears in :data:`attributes.ATTRIBUTE_CAPS`, which is
+    what the backend not treating them as string columns looks like from here.
+
+    **This function is also the seam any future per-value work belongs in.**
+    ATTR-09's cap validation (plan 03-04) runs between the snapshot and the
+    write, which is exactly this expression, and it needs the parameter names the
+    snapshot is keyed by in order to name the offending argument back at the
+    caller. Adding an encoding or coercion step anywhere downstream — in the
+    processor's write loop, say — would put it after the point where the
+    parameter name is gone.
     """
     return {PARAMETER_TO_ATTRIBUTE_KEY[name]: value for name, value in snapshot.items()}
