@@ -169,7 +169,7 @@ def test_gen_ai_system_is_read_when_the_current_spelling_is_absent() -> None:
     assert infer_provider(span) == "cohere"
 
 
-def test_the_message_format_wins_over_the_model_name_prefix() -> None:
+def test_the_message_format_wins_over_the_model_prefix() -> None:
     """Step 3 outranks step 4: which integration emitted the span is structural.
 
     The model name is a heuristic that proxies and aliases defeat; the format
@@ -239,6 +239,63 @@ def test_the_model_is_read_from_span_inputs_when_the_model_attribute_is_absent()
     span = _provider_span(inputs_model="claude-opus-4-1")
 
     assert infer_provider(span) == "anthropic"
+
+
+def test_a_house_aliased_model_attribute_does_not_send_a_claude_span_to_the_sentinel() -> None:
+    """WR-04: inference and the emitted request model must read the same names.
+
+    ``mlflow.llm.model`` and ``mlflow.spanInputs["model"]`` disagree here, which
+    the SEM-03 comment in ``map_span`` says is the normal case on OpenAI and
+    Azure — a gateway alias, an internal name, a fine-tune with a house prefix.
+    Inference used to consult only the first, so this span went out labelled with
+    the unknown-provider sentinel while carrying, in its own emitted attributes,
+    a model name the prefix table resolves.
+
+    Both halves live in one test deliberately, in the style this file already
+    uses for criterion 4: the inference assertion alone would pass on a build
+    that emitted some other model, and what is wrong in that case is the
+    relationship between the two, not either one on its own.
+    """
+    span = _provider_span(model="house-alias-v3", inputs_model="claude-sonnet-4-5")
+
+    assert infer_provider(span) == "anthropic"
+    assert map_span(span).attributes["gen_ai.request.model"] == "claude-sonnet-4-5"
+
+
+def test_a_capitalised_model_does_not_match_the_prefix_table() -> None:
+    """SEM-01's encoding edge at step 4, the twin of the message-format case above.
+
+    Comparison is exact over the decoded value at both heuristic steps: no case
+    folding and no Unicode normalization. ``GPT-4o`` therefore falls through to
+    the sentinel rather than matching ``gpt-``. Folding would be a second,
+    undeclared rule about what counts as the same model — and now that step 4
+    consults every model the span records, a fold would apply to two strings
+    rather than one.
+    """
+    span = _provider_span(model="GPT-4o")
+
+    assert infer_provider(span) == PROVIDER_SENTINEL
+
+
+def test_an_empty_attribute_mapping_infers_the_sentinel_and_never_an_empty_string() -> None:
+    """SEM-01's empty-input edge, asserted as three claims rather than one.
+
+    ``test_a_span_with_an_empty_attribute_map_infers_the_sentinel`` above already
+    says the degenerate input returns the sentinel rather than raising. This one
+    says what SEM-01 actually requires of the returned value: that it is not
+    empty, and that it is not the resource claim. An empty provider key drops the
+    payload to the backend's ``GenericFallbackMapper``, which rates it under
+    ``"Unknown"`` with no error on either side; returning the resource claim
+    instead would make "we could not infer this span's provider" indistinguishable
+    from "the resource claim is doing its job" (D-C2).
+    """
+    span = build_readable_span(attributes={}, start_time_ns=_START_NS, end_time_ns=_END_NS)
+
+    inferred = infer_provider(span)
+
+    assert inferred == PROVIDER_SENTINEL
+    assert inferred != ""
+    assert inferred != RESOURCE_PROVIDER_CLAIM
 
 
 # --- The prohibition: no framework value becomes a provider name -------------

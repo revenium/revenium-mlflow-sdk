@@ -494,31 +494,54 @@ def resource_claim_attributes() -> _Mapping[str, str]:
     return _RESOURCE_CLAIM_ATTRIBUTES
 
 
-def _model_name(attributes: _Mapping[str, object], /) -> str | None:
-    """The model this span asked for, from either place MLflow records it.
-
-    ``mlflow.llm.model`` first, then ``mlflow.spanInputs["model"]``. The second
-    is not redundant: the model attribute is written by
-    ``set_span_model_attribute``, which is guarded and can decline, while the
-    request kwargs carry the name regardless. Reading only the attribute would
-    send those spans to the sentinel with the answer sitting one key away.
-    """
-    model = _spanattrs.decode_str(attributes, _spanattrs.MLFLOW_LLM_MODEL)
-    if model:
-        return model
-    inputs = _spanattrs.decode_mapping(attributes, _spanattrs.MLFLOW_SPAN_INPUTS)
-    if inputs is None:
-        return None
-    candidate = inputs.get("model")
-    return candidate if isinstance(candidate, str) and candidate else None
-
-
 def _mapping_model(mapping: _Mapping[str, object] | None, /) -> str | None:
     """The model name inside a decoded MLflow inputs or outputs mapping, if any."""
     if mapping is None:
         return None
     candidate = mapping.get(_MODEL_FIELD)
     return candidate if isinstance(candidate, str) and candidate else None
+
+
+def _model_candidates(attributes: _Mapping[str, object], /) -> tuple[str, ...]:
+    """Every model name this span records, in the order :func:`map_span` emits them.
+
+    Args:
+        attributes: A span's raw attribute mapping.
+
+    Returns:
+        The usable model names, de-duplicated with first occurrence winning, in
+        the order ``gen_ai.request.model``, ``gen_ai.response.model``, then the
+        shared fallback. Empty and non-string values are skipped rather than
+        returned, so every element is a name the prefix table can be asked about.
+
+    **Both emitted model keys are candidates because the attribute's provenance
+    differs by integration.** ``mlflow.llm.model`` is the *response* model on the
+    OpenAI path and the *request* model on Anthropic's — ``map_span``'s own SEM-03
+    comment sets that out — while the request kwargs in ``mlflow.spanInputs``
+    carry the requested name regardless, on paths where
+    ``set_span_model_attribute`` declined to write the attribute at all.
+    Inferring from one of them sends a span to :data:`PROVIDER_SENTINEL` while
+    the answer sits in the span's own other emitted attribute: a span with
+    ``mlflow.llm.model = "house-alias-v3"`` and an inputs model of
+    ``claude-sonnet-4-5`` went out labelled with the unknown-provider sentinel
+    while emitting ``gen_ai.request.model = "claude-sonnet-4-5"`` (WR-04).
+
+    **The accepted cost, stated rather than left to be discovered.** Step 4 of
+    :func:`infer_provider` is a heuristic, and a second candidate is a second
+    chance for a plausible-but-wrong prefix match. The mitigation is unchanged
+    and it is structural: steps 1 to 3 are authoritative and run first, so a span
+    whose provider is actually asserted — by MLflow, by a bridged instrumentor,
+    or by the message format — never reaches step 4 at all.
+    """
+    inputs = _spanattrs.decode_mapping(attributes, _spanattrs.MLFLOW_SPAN_INPUTS)
+    outputs = _spanattrs.decode_mapping(attributes, _spanattrs.MLFLOW_SPAN_OUTPUTS)
+    recorded = _spanattrs.decode_str(attributes, _spanattrs.MLFLOW_LLM_MODEL)
+
+    candidates: list[str] = []
+    for candidate in (_mapping_model(inputs), _mapping_model(outputs), recorded):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return tuple(candidates)
 
 
 def _finish_reasons(outputs: _Mapping[str, object] | None, /) -> tuple[str, ...] | None:
@@ -628,8 +651,9 @@ def infer_provider(span: _ReadableSpan, /) -> str:
        **structural**, and the step that makes SEM-01's criterion 4 hold: MLflow's
        OpenAI autolog never writes a provider, but it does write
        ``mlflow.message.format = "openai"``.
-    4. A model-name prefix through :data:`MODEL_PREFIX_PROVIDERS` —
-       **heuristic**, and last for that reason.
+    4. A model-name prefix through :data:`MODEL_PREFIX_PROVIDERS`, tried against
+       **every** model name the span records rather than one of them
+       (:func:`_model_candidates`) — **heuristic**, and last for that reason.
     5. :data:`PROVIDER_SENTINEL`.
 
     Comparison at steps 3 and 4 is **exact over the decoded value**: no case
@@ -656,8 +680,11 @@ def infer_provider(span: _ReadableSpan, /) -> str:
     if message_format is not None and message_format in MESSAGE_FORMAT_PROVIDERS:
         return MESSAGE_FORMAT_PROVIDERS[message_format]
 
-    model = _model_name(attributes)
-    if model is not None:
+    # Every model name the span emits, in the order it emits them, against the
+    # table in its declared longest-prefix-first order: the first prefix hit on
+    # the first candidate that hits wins (WR-04). One candidate was not enough —
+    # see :func:`_model_candidates`.
+    for model in _model_candidates(attributes):
         for prefix, provider in MODEL_PREFIX_PROVIDERS:
             if model.startswith(prefix):
                 return provider
