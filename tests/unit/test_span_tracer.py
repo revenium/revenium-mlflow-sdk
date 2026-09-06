@@ -26,9 +26,9 @@ import sys
 from pathlib import Path
 
 import pytest
+
 from revenium_mlflow.tracing.eligibility import is_billable_llm_span
 from revenium_mlflow.tracing.semconv import MappedSpan, map_span
-
 from tests.fixtures.spans import mlflow_chat_model_span
 
 pytestmark = pytest.mark.unit
@@ -111,6 +111,32 @@ def test_the_mapped_span_carries_the_cache_read_token_count(mapped: MappedSpan) 
     reports an error.
     """
     assert mapped.attributes["gen_ai.usage.cache_read_input_tokens"] == 900
+
+
+def test_all_four_token_counts_are_emitted_when_the_span_carries_them() -> None:
+    """Both cache spellings survive, not only the one the captured span happened to have.
+
+    The captured wire shape in ``mlflow_chat_model_span`` carries no
+    ``cache_creation_input_tokens`` — the real span measured in 02-RESEARCH.md did
+    not — so the assertions above exercise three counts. This is the fourth. It is
+    a separate test rather than an addition to that fixture on purpose: editing
+    the captured shape to carry a field the capture did not would make the
+    fixture's claim to reproduce the wire false, and every later plan reads it as
+    the wire.
+    """
+    usage = {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "cache_read_input_tokens": 3,
+        "cache_creation_input_tokens": 2,
+    }
+    attributes = map_span(mlflow_chat_model_span(usage=usage)).attributes
+    assert {k: v for k, v in attributes.items() if k.startswith("gen_ai.usage.")} == {
+        "gen_ai.usage.input_tokens": 100,
+        "gen_ai.usage.output_tokens": 20,
+        "gen_ai.usage.cache_read_input_tokens": 3,
+        "gen_ai.usage.cache_creation_input_tokens": 2,
+    }
 
 
 def test_the_provider_is_non_empty_under_both_key_spellings(mapped: MappedSpan) -> None:
