@@ -33,6 +33,32 @@ spans ``eligibility.is_billable_llm_span`` has already admitted. Re-deriving the
 decision here would be a second predicate to keep in sync with the first, which
 is the failure D-C1's single shared decoder exists to prevent one layer down.
 
+**Correction C2 — the instrumentation-scope step is refuted, and the reason is
+recorded so it is not re-added.** D-14 ordered provider inference
+``mlflow.llm.provider`` → instrumentation-scope name → model-name prefix, citing
+scope names ``mlflow.openai`` and ``mlflow.anthropic``. A span captured off
+MLflow's own bridged tracer provider carries scope name
+``mlflow.tracing.provider``, and the cause is structural: ``_get_tracer`` is
+called with ``__name__`` from inside ``mlflow/tracing/provider.py`` itself for
+the fluent and no-context span paths, which is where the OpenAI, Anthropic,
+Gemini and Bedrock autologs all enter. Only four peripheral integrations
+(``haystack``, ``strands``, ``semantic_kernel``, ``agno``) pass their own module
+name. The step never fires, so leaving it in would be worse than removing it: it
+would read as a working fallback while the model-prefix heuristic silently
+carried the whole load. :data:`MESSAGE_FORMAT_PROVIDERS` replaces it — written
+per integration, it is the structural fact about *which integration emitted the
+span* that D-14 wanted from the scope name.
+
+**Base URL is declined (D-C4), with the reason, so the question is not
+re-opened.** D-14 left it open for lowest precedence "if it is reachable from
+span attributes alone". It is not. The OpenAI autolog writes exactly
+``mlflow.message.format`` and ``mlflow.chat.tokenUsage`` directly plus the model
+through ``set_span_chat_attributes``; the client's ``base_url`` lives on the
+client *instance* and would only reach the span through ``mlflow.spanInputs``,
+which holds request kwargs, not client configuration. Reaching it would mean
+touching the client object, breaking the dict-in/dict-out purity that makes this
+module testable without MLflow — for a signal that is not on the span.
+
 Nothing here imports MLflow (D-05). Importing ``opentelemetry`` at module scope
 is expected and permitted for the same reason ``processor.py`` records: these are
 the public locations of the span types, they register no global state, and they
@@ -67,9 +93,12 @@ __all__ = [
     "GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS",
     "GEN_AI_USAGE_INPUT_TOKENS",
     "GEN_AI_USAGE_OUTPUT_TOKENS",
+    "MESSAGE_FORMAT_PROVIDERS",
+    "MODEL_PREFIX_PROVIDERS",
     "PROVIDER_SENTINEL",
     "SPAN_TYPE_TO_OPERATION",
     "MappedSpan",
+    "infer_provider",
     "map_span",
 ]
 
@@ -189,8 +218,70 @@ SPAN_TYPE_TO_OPERATION: _Final[_Mapping[str, str]] = _types.MappingProxyType(
 #: fallback path — an omitted key would be a billing event with no attributable
 #: cause. The literal deliberately does **not** lowercase to ``unknown``: the
 #: generic fallback rates under provider id ``"Unknown"``, and merging into that
-#: bucket would partly defeat the point.
+#: bucket would partly defeat the point. A configurable ``default_provider`` was
+#: considered and rejected: it is a new public configuration field in a phase
+#: scoped to two pure functions, and it would let a customer set a *real*
+#: provider name as the value for spans nobody could attribute — turning a
+#: visible unknown back into an invisible wrong answer. Deferred to Phase 4 as an
+#: idea, not as a commitment.
 PROVIDER_SENTINEL: _Final[str] = "revenium-unknown-provider"
+
+#: ``mlflow.message.format`` to provider, as a **positive allowlist** of the six
+#: values that genuinely name a provider. A denylist of framework values was
+#: rejected: roughly a third of the thirty-plus observed format values name a
+#: framework (``langchain``, ``llamaindex``, ``dspy``, ``crewai``, ``ag2``,
+#: ``autogen``, ``smolagents``, ``pydantic_ai``, ``openai-agent``, ``vercel_ai``,
+#: ``voltagent``, ``livekit``), and a denylist would let the *next* MLflow
+#: framework integration invent a provider name by accident. This is the same
+#: allowlist-not-denylist discipline SEM-10 applies to span types.
+#:
+#: **``gemini`` is the one entry whose key and value differ, and that is
+#: deliberate — do not "correct" it.** The ``gemini-`` prefix in
+#: :data:`MODEL_PREFIX_PROVIDERS` also yields ``google``, and one provider must
+#: have exactly one spelling across every step of the chain. Mapping ``gemini``
+#: to itself would not surface as a conflict anywhere; it would surface as one
+#: customer's Gemini history split across two provider labels, each of which then
+#: reads as correct forever.
+#:
+#: A proxy rather than a plain dict, for the reason ``attributes.py`` records for
+#: ``ATTRIBUTE_CAPS``: a caller who could widen this table in their own process
+#: would be changing what a customer is attributed to.
+MESSAGE_FORMAT_PROVIDERS: _Final[_Mapping[str, str]] = _types.MappingProxyType(
+    {
+        "openai": "openai",
+        "anthropic": "anthropic",
+        #: The one key/value mismatch, and it is load-bearing. See above.
+        "gemini": "google",
+        "bedrock": "bedrock",
+        "groq": "groq",
+        "mistral": "mistral",
+    }
+)
+
+#: Model-name prefix to provider, **longest prefix first** (D-C5). An ordered
+#: tuple rather than a mapping because iteration order carries meaning here:
+#: matching is first-hit, so the order decides the answer, and a tuple declares
+#: that where a dict would leave it implicit. A diff on this table then reads as
+#: an addition or a removal rather than as a reshuffle.
+#:
+#: This step is **deliberately last** before the sentinel. A proxied or aliased
+#: model name — a gateway that renames models, an internal alias, a fine-tune
+#: with a house prefix — defeats it, and a wrong-but-plausible provider label is
+#: worse than a visible unknown because the customer cannot discover it. A miss
+#: here therefore costs a sentinel, never a wrong label.
+MODEL_PREFIX_PROVIDERS: _Final[tuple[tuple[str, str], ...]] = (
+    ("chatgpt-", "openai"),
+    ("command-", "cohere"),
+    ("mistral-", "mistral"),
+    ("claude-", "anthropic"),
+    # Lowercase ``google``, not the capitalised vendor name (D-C8), and the same
+    # literal ``MESSAGE_FORMAT_PROVIDERS["gemini"]`` yields.
+    ("gemini-", "google"),
+    ("llama-", "meta"),
+    ("gpt-", "openai"),
+    ("o1-", "openai"),
+    ("o3-", "openai"),
+)
 
 #: The MLflow usage field to emit each token key from. One tuple rather than four
 #: hand-written lookups, so a key cannot be read from the wrong field.
@@ -265,17 +356,86 @@ def _token_int(value: object, /) -> int | None:
     return value
 
 
-def _infer_provider(span: _ReadableSpan, /) -> str:
-    """The provider, never empty.
+def _model_name(attributes: _Mapping[str, object], /) -> str | None:
+    """The model this span asked for, from either place MLflow records it.
 
-    A stub for this slice: MLflow's own assertion, then the sentinel. Plan 02-03
-    replaces the middle of the chain — an already-present ``gen_ai.provider.name``,
-    ``mlflow.message.format`` through a provider-only allowlist, then a
-    model-name prefix — without changing this function's shape.
+    ``mlflow.llm.model`` first, then ``mlflow.spanInputs["model"]``. The second
+    is not redundant: the model attribute is written by
+    ``set_span_model_attribute``, which is guarded and can decline, while the
+    request kwargs carry the name regardless. Reading only the attribute would
+    send those spans to the sentinel with the answer sitting one key away.
     """
-    attributes = span.attributes or {}
-    provider = _spanattrs.decode_str(attributes, _spanattrs.MLFLOW_LLM_PROVIDER)
-    return provider or PROVIDER_SENTINEL
+    model = _spanattrs.decode_str(attributes, _spanattrs.MLFLOW_LLM_MODEL)
+    if model:
+        return model
+    inputs = _spanattrs.decode_mapping(attributes, _spanattrs.MLFLOW_SPAN_INPUTS)
+    if inputs is None:
+        return None
+    candidate = inputs.get("model")
+    return candidate if isinstance(candidate, str) and candidate else None
+
+
+def infer_provider(span: _ReadableSpan, /) -> str:
+    """The provider for one span, in five ordered steps, never empty.
+
+    Args:
+        span: Any span. Nothing is assumed about its attributes — an empty
+            mapping is a legal input and returns :data:`PROVIDER_SENTINEL`.
+
+    Returns:
+        A non-empty provider name. This function has no ``raise`` path: it runs
+        inside a ``SpanProcessor`` callback for every span in the host process,
+        and raising there would fail an export batch over one malformed span.
+
+    The order is the whole design, so it is written out rather than left to be
+    read off the body:
+
+    1. ``mlflow.llm.provider`` — **authoritative**, MLflow asserted it. Thirteen
+       or more integrations set it, Anthropic among them
+       (``mlflow/anthropic/autolog.py:140``).
+    2. A ``gen_ai.provider.name`` or ``gen_ai.system`` already on the span —
+       **authoritative**, a bridged non-MLflow OTel instrumentor asserted it, and
+       a heuristic must not overwrite an assertion made closer to the call. This
+       step is the addition beyond D-14, and it is free.
+    3. ``mlflow.message.format`` through :data:`MESSAGE_FORMAT_PROVIDERS` —
+       **structural**, and the step that makes SEM-01's criterion 4 hold: MLflow's
+       OpenAI autolog never writes a provider, but it does write
+       ``mlflow.message.format = "openai"``.
+    4. A model-name prefix through :data:`MODEL_PREFIX_PROVIDERS` —
+       **heuristic**, and last for that reason.
+    5. :data:`PROVIDER_SENTINEL`.
+
+    Comparison at steps 3 and 4 is **exact over the decoded value**: no case
+    folding and no Unicode normalization. ``"OpenAI"`` does not match
+    ``"openai"`` and falls through. Folding would be a second, undeclared rule
+    about what counts as the same provider, and it would admit values MLflow
+    never writes.
+    """
+    attributes: _Mapping[str, object] = span.attributes or {}
+
+    asserted = _spanattrs.decode_str(attributes, _spanattrs.MLFLOW_LLM_PROVIDER)
+    if asserted:
+        return asserted
+
+    for key in (GEN_AI_PROVIDER_NAME, GEN_AI_SYSTEM):
+        # Through the same decoder as everything else (D-C1): a bridged
+        # instrumentor writes these bare, MLflow would write them JSON-encoded,
+        # and the lenient reader accepts both without a second code path.
+        declared = _spanattrs.decode_str(attributes, key)
+        if declared:
+            return declared
+
+    message_format = _spanattrs.decode_str(attributes, _spanattrs.MLFLOW_MESSAGE_FORMAT)
+    if message_format is not None and message_format in MESSAGE_FORMAT_PROVIDERS:
+        return MESSAGE_FORMAT_PROVIDERS[message_format]
+
+    model = _model_name(attributes)
+    if model is not None:
+        for prefix, provider in MODEL_PREFIX_PROVIDERS:
+            if model.startswith(prefix):
+                return provider
+
+    return PROVIDER_SENTINEL
 
 
 def _operation(attributes: _Mapping[str, object], /) -> str | None:
@@ -328,6 +488,14 @@ def map_span(
     if request_model:
         attributes[GEN_AI_REQUEST_MODEL] = request_model
 
+    # D-02: each token count gets **exactly one** spelling, which is the opposite
+    # call to the provider's two spellings below, and the asymmetry is deliberate
+    # and must not be harmonized. The reason is arithmetic: a backend that sums
+    # rather than dedupes duplicate keys would double the count, and these are
+    # the numbers the invoice is computed from. A duplicate *string* key cannot
+    # be summed, so it costs nothing; a duplicate *numeric* key can be, so it
+    # costs the customer money. Same evidence, opposite answers, because the
+    # failure modes are not symmetric.
     usage = _spanattrs.decode_mapping(source, _spanattrs.MLFLOW_CHAT_USAGE) or {}
     for field, key in _TOKEN_FIELD_TO_KEY:
         count = _token_int(usage.get(field))
@@ -336,10 +504,16 @@ def map_span(
         if count is not None:
             attributes[key] = count
 
-    # D-16: one inferred value, both spellings. See GEN_AI_SYSTEM for why this is
-    # the opposite call to the single cache-token spelling, and why the asymmetry
-    # must not be tidied away.
-    provider = _infer_provider(span)
+    # D-16: one inferred value, written under **both** spellings — the current
+    # semantic-convention key and the older one the backend still accepts. This
+    # is the opposite call to the single cache-token spelling above, and the
+    # asymmetry is deliberate and must not be harmonized. The reason is again
+    # arithmetic: duplicate *string* keys carry no summing risk at all, so
+    # carrying both costs nothing and buys compatibility, while duplicate
+    # *numeric* keys risk a backend that sums rather than dedupes. The deployed
+    # backend build is still unverified, which is why the compatibility spelling
+    # is carried at all rather than dropped as redundant.
+    provider = infer_provider(span)
     attributes[GEN_AI_PROVIDER_NAME] = provider
     attributes[GEN_AI_SYSTEM] = provider
 
