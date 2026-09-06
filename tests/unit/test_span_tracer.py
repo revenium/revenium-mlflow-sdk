@@ -50,7 +50,7 @@ def test_the_fixture_carries_mlflows_json_encoding() -> None:
     """A fixture storing a bare value would make every test below vacuous.
 
     MLflow serializes every span attribute to JSON, so the raw wire value is
-    ``'"CHAT_MODEL"'`` — six characters longer than it looks and identical to the
+    ``'"CHAT_MODEL"'`` — two characters longer than it looks and identical to the
     bare form in a debugger that strips one layer of quoting. A predicate that
     compared the raw value to ``CHAT_MODEL`` would reject every real span while
     passing every test built on an un-encoded fixture.

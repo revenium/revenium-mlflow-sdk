@@ -11,7 +11,7 @@ rather than unlikely.
 **The decode contract (D-07).** MLflow serializes *every* span attribute to a
 JSON string before it reaches OpenTelemetry
 (``mlflow/entities/span.py:1509`` at 3.16.0), so ``mlflow.spanType`` arrives on
-the wire as ``'"CHAT_MODEL"'`` — six characters longer than it looks.
+the wire as ``'"CHAT_MODEL"'`` — two characters longer than it looks.
 :func:`decode` mirrors MLflow's own reader, ``_SpanAttributesRegistry.get``, body
 for body: a truthiness-guarded walrus, ``json.loads`` inside ``try``, and the raw
 serialized value returned on any exception. Cited with the version because the

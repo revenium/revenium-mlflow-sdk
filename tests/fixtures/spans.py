@@ -43,7 +43,7 @@ must ``json.dumps`` its own MLflow-namespaced values at the call site.
 Why every MLflow value is JSON-encoded at all: MLflow serializes every span
 attribute to a JSON string before it reaches OpenTelemetry
 (``mlflow/entities/span.py:1509`` at 3.16.0), so ``mlflow.spanType`` arrives on
-the wire as ``'"CHAT_MODEL"'`` — six characters longer than it looks, and
+the wire as ``'"CHAT_MODEL"'`` — two characters longer than it looks, and
 identical to the bare form in a debugger that strips one layer of quoting. The
 builder must produce the wire shape, not a convenience shape, or every test
 downstream of it exercises a span that never existed.
