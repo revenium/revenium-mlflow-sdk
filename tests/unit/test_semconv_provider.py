@@ -476,3 +476,27 @@ def test_neither_literal_lowercases_to_the_generic_fallback_provider_id() -> Non
     literals avoid the question rather than answer it.
     """
     assert {PROVIDER_SENTINEL.lower(), RESOURCE_PROVIDER_CLAIM.lower()}.isdisjoint({"unknown"})
+
+
+def test_the_model_prefix_table_is_ordered_longest_prefix_first() -> None:
+    """D-C5's ordering invariant, asserted in the tree rather than by a one-off probe.
+
+    Matching at step 4 is first-hit, so the order of this table decides the
+    answer. Today no shorter entry is a prefix of a longer one, so a reshuffle
+    changes no result and every behavioural test above stays green — which is
+    exactly why this assertion is structural. The first entry pair that *does*
+    overlap would otherwise be mislabelled silently, and a mislabelled provider
+    is not discoverable by the customer.
+
+    Importing the table here is not the thing the module docstring forbids. That
+    rule is about asserting the chain's *answers* against the table, which would
+    agree with any future edit to it. This asserts a property the table must
+    have whatever its contents are — the same distinction
+    ``tests/unit/test_eligibility.py`` draws when it cross-checks type *names*
+    while keeping every billing verdict an independent literal.
+    """
+    from revenium_mlflow.tracing.semconv import MODEL_PREFIX_PROVIDERS
+
+    lengths = [len(prefix) for prefix, _ in MODEL_PREFIX_PROVIDERS]
+
+    assert lengths == sorted(lengths, reverse=True)
