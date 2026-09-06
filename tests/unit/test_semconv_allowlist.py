@@ -56,6 +56,34 @@ result is exactly what a check inspecting nothing also produces, so each planted
 string is asserted present on the span it was planted in *before* its absence
 from the output means anything. ``tests/fixtures/planted_private_access.py``
 records the same discipline for the private-access scanner.
+
+**Known-dirty is necessary and was not sufficient, which is the lesson plan
+02-08 exists to record.** The predecessor of the control below planted its
+markers in ``messages[].content`` and ``choices[].message.content`` and proved
+them present on the span — and ``map_span`` reads neither path. The precondition
+passed, the absence assertion passed, and a credential-bearing URL reached
+``gen_ai.response.finish_reasons`` verbatim the whole time (GAP-2, WR-06). A
+marker has to be planted where the function under test *reads*, not merely
+somewhere on its input.
+
+**Planting where the mapper reads forces a question the old control never had to
+answer: which keys is an absence assertion entitled to cover?** Not all of them.
+Every marker below therefore belongs to exactly one declared value class, and
+the class decides which assertion sees it:
+
+*Class A — closed-set values.* ``gen_ai.response.finish_reasons`` and
+``error.type`` may carry only a member of a closed set, so an absence assertion
+is entitled to cover them. :data:`_FORBIDDEN_CONTENT` is swept against them by
+:func:`test_no_emitted_value_carries_any_forbidden_content`.
+
+*Class B — identifier values.* ``gen_ai.request.model``,
+``gen_ai.response.model``, ``gen_ai.response.id`` and ``gen_ai.operation.name``
+carry the provider's or the span's own identifier, bounded by a character cap
+and by nothing else. SEM-03 *requires* the provider's own model string, so an
+absence assertion over these could only ever be made green by deleting the
+plant. :data:`_FORWARDED_IDENTIFIERS` is asserted **present** on them by
+:func:`test_the_model_and_id_keys_forward_the_providers_own_string` instead. The
+perimeter is a written decision, not whatever the sweep happened to cover.
 """
 
 import inspect
@@ -152,29 +180,89 @@ _PROMPT_CONTENT = "planted-prompt-text-6f2a91"
 _COMPLETION_CONTENT = "planted-completion-text-b47d03"
 _EXCEPTION_MARKER = "planted-exception-secret-1d9e"
 
-_CONTENT_STRINGS = (_PROMPT_CONTENT, _COMPLETION_CONTENT, _EXCEPTION_MARKER)
+#: The fourth forbidden marker, and the only one shaped like the reproduction
+#: 02-VERIFICATION.md recorded rather than like a category: a URL carrying an
+#: embedded key-shaped token. Synthetic — ``rev_sk_planted_4a2d`` is not a
+#: credential and never was — but it is the exact shape CLAUDE.md requires be
+#: redacted from anything leaving the process. It is planted in ``status`` on a
+#: subject of its own, because ``status`` already carries
+#: :data:`_COMPLETION_CONTENT` on the shared content span and one field cannot
+#: hold two markers.
+_CREDENTIAL_CONTENT = "https://user:rev_sk_planted_4a2d@api.internal.example.com/v1 failed: 401"
 
-#: A request carrying prompt text, shaped like what MLflow serializes into
-#: ``mlflow.spanInputs``.
+#: Class A. Markers that must reach **no** emitted value, planted in the three
+#: Class A source fields ``map_span`` reads (``status``, ``stop_reason``,
+#: ``choices[].finish_reason``) plus the two content paths it does not read
+#: today. The two retained plants stay deliberately: they are the real
+#: disclosure surface, and a future read added to either path is caught by the
+#: control the day it lands.
+_FORBIDDEN_CONTENT = (
+    _PROMPT_CONTENT,
+    _COMPLETION_CONTENT,
+    _EXCEPTION_MARKER,
+    _CREDENTIAL_CONTENT,
+)
+
+#: Class B. Markers the mapper is **expected** to forward, planted in the three
+#: Class B source fields ``map_span`` reads: ``inputs["model"]``,
+#: ``outputs["model"]`` and ``outputs["id"]``. SEM-03 requires the provider's own
+#: model string and SEM-06 the provider's own response id, so an absence
+#: assertion covering these keys could only ever be made green by deleting the
+#: plant — which is the defect this run exists to close. The plant stays and the
+#: assertion is scoped instead; the exception is asserted by name in
+#: :func:`test_the_model_and_id_keys_forward_the_providers_own_string`.
+#:
+#: **Every one of these is deliberately shorter than the 64-character cap plan
+#: 02-08 introduces** — the longest, :data:`_FORWARDED_REQUEST_MODEL`, is 39
+#: code points. That is what makes the carve-out test pass for the reason it
+#: claims: the plant's *placement* in a Class B field decides it, not
+#: ``semconv._bounded`` happening to let it through.
+_FORWARDED_REQUEST_MODEL = "gpt-4o-forwarded-request-model-5b1e7a3c"
+_FORWARDED_RESPONSE_MODEL = "gpt-4o-forwarded-response-model-9d4c"
+_FORWARDED_RESPONSE_ID = "chatcmpl-forwarded-response-id-2f86"
+
+_FORWARDED_IDENTIFIERS = (
+    _FORWARDED_REQUEST_MODEL,
+    _FORWARDED_RESPONSE_MODEL,
+    _FORWARDED_RESPONSE_ID,
+)
+
+#: A request carrying prompt text **and** the forwarded request-model marker,
+#: shaped like what MLflow serializes into ``mlflow.spanInputs``. ``model`` is
+#: the field ``map_span`` reads for ``gen_ai.request.model``; ``messages`` is a
+#: path it does not read, kept so a future read there fails this file.
 _INPUTS_WITH_CONTENT: Mapping[str, object] = {
-    "model": "gpt-4o",
+    "model": _FORWARDED_REQUEST_MODEL,
     "messages": [{"role": "user", "content": _PROMPT_CONTENT}],
 }
 
-#: A response carrying completion text, shaped like what MLflow serializes into
-#: ``mlflow.spanOutputs``. The finish reason and the response id are here on
-#: purpose: they are emitted, so the absence assertion below is running against
-#: an output that really did read this mapping rather than one that ignored it.
+#: A response carrying a marker in **every** field ``map_span`` reads out of
+#: ``mlflow.spanOutputs``, split by value class. ``id`` and ``model`` carry
+#: Class B markers the mapper must forward; ``status``, ``stop_reason`` and
+#: ``choices[0]["finish_reason"]`` carry the Class A marker it must not.
+#:
+#: Before plan 02-08 the plants were ``"chatcmpl-planted"``, ``"gpt-4o-2024-08-06"``
+#: and ``"stop"`` — three benign literals in the fields the mapper reads, with
+#: the markers confined to ``messages[].content`` and
+#: ``choices[].message.content``, which it reads neither of. The absence
+#: assertion below was therefore structurally incapable of failing (GAP-2,
+#: WR-06). Moving the markers into the read fields is what gives it a boundary.
 _OUTPUTS_WITH_CONTENT: Mapping[str, object] = {
-    "id": "chatcmpl-planted",
-    "model": "gpt-4o-2024-08-06",
+    "id": _FORWARDED_RESPONSE_ID,
+    "model": _FORWARDED_RESPONSE_MODEL,
+    "status": _COMPLETION_CONTENT,
+    "stop_reason": _COMPLETION_CONTENT,
     "choices": [
         {
-            "finish_reason": "stop",
+            "finish_reason": _COMPLETION_CONTENT,
             "message": {"role": "assistant", "content": _COMPLETION_CONTENT},
         }
     ],
 }
+
+#: The credential reproduction, on its own subject. ``status`` is a Class A
+#: source, so this belongs squarely in the forbidden set.
+_OUTPUTS_WITH_CREDENTIAL: Mapping[str, object] = {"status": _CREDENTIAL_CONTENT}
 
 #: The arguments every helper that has a *required* parameter needs. Kept
 #: explicit and asserted complete: a helper that grows a required parameter must
@@ -236,6 +324,9 @@ def _content_spans() -> dict[str, ReadableSpan]:
             outputs=_OUTPUTS_WITH_CONTENT,
         ),
         "planted_error_span": span_fixtures.error_span(marker=_EXCEPTION_MARKER),
+        "credential_span": span_fixtures.mlflow_chat_model_span(
+            outputs=_OUTPUTS_WITH_CREDENTIAL,
+        ),
     }
 
 
@@ -456,6 +547,10 @@ def test_no_emitted_value_is_none() -> None:
         (_PROMPT_CONTENT, "content_span"),
         (_COMPLETION_CONTENT, "content_span"),
         (_EXCEPTION_MARKER, "planted_error_span"),
+        (_CREDENTIAL_CONTENT, "credential_span"),
+        (_FORWARDED_REQUEST_MODEL, "content_span"),
+        (_FORWARDED_RESPONSE_MODEL, "content_span"),
+        (_FORWARDED_RESPONSE_ID, "content_span"),
     ],
 )
 def test_the_planted_content_is_present_on_the_span_it_was_planted_in(
@@ -465,27 +560,113 @@ def test_the_planted_content_is_present_on_the_span_it_was_planted_in(
 
     Without this, the assertion below is satisfied just as well by a fixture that
     stopped carrying the content at all, or by a mapper that emitted nothing.
+
+    Every marker in **both** value classes is covered, not only the forbidden
+    ones. The Class B markers are the precondition of the carve-out test in the
+    same way: an assertion that the mapper forwarded an identifier proves nothing
+    if the identifier was never on the span.
     """
     assert content in _span_text(_all_spans()[subject])
 
 
-def test_no_emitted_value_carries_any_planted_content() -> None:
-    """The first prohibition, made mechanical (T-02-03).
+def test_no_marker_belongs_to_both_value_classes() -> None:
+    """The two sets must not overlap, in either direction, at substring level.
+
+    Both sweeps below match by substring. If a forwarded identifier contained a
+    forbidden marker, the Class A control would red on a Class B key and the
+    failure would name the wrong defect; if a forbidden marker contained a
+    forwarded one, the carve-out would go green on a leak. Neither is possible
+    with markers this file chose, and this is the assertion that keeps it that
+    way when someone edits one of them.
+    """
+    overlaps = sorted(
+        f"{forbidden!r} <-> {forwarded!r}"
+        for forbidden in _FORBIDDEN_CONTENT
+        for forwarded in _FORWARDED_IDENTIFIERS
+        if forbidden in forwarded or forwarded in forbidden
+    )
+    assert overlaps == [], overlaps
+
+
+def test_no_emitted_value_carries_any_forbidden_content() -> None:
+    """The first prohibition, made mechanical (T-02-03), over Class A only.
 
     Prompt text, completion text, system instructions, tool arguments and tool
-    results must never reach the wire. ``map_span`` reads the mappings that hold
-    all of it, so this is one field access away at every mapping — no
-    convenience, no debugging aid and no future field may create a path for it.
-    The closed allowlist is the structural control; this is the measurement.
+    results must never reach the wire, and no free text from a response body may
+    reach a Class A key. ``map_span`` reads the mappings that hold all of it, so
+    this is one field access away at every mapping — no convenience, no debugging
+    aid and no future field may create a path for it.
+
+    **The perimeter, written down rather than left to whatever the sweep
+    happened to cover.** This sweeps :data:`_FORBIDDEN_CONTENT` and not
+    :data:`_FORWARDED_IDENTIFIERS`, because 02-VERIFICATION.md answers the
+    question directly:
+
+        The model and id keys copying provider-controlled strings is inherent to
+        SEM-03 and defensible. The sharp edge is ``FINISH_REASON_SOURCES``'
+        ``("status", None)`` row.
+
+    An absence assertion covering ``gen_ai.request.model``,
+    ``gen_ai.response.model`` or ``gen_ai.response.id`` could only ever be made
+    green by deleting the plant from those fields — which is precisely how the
+    predecessor of this test shipped green while a credential-bearing URL reached
+    ``gen_ai.response.finish_reasons`` verbatim. The keys this test stops
+    covering are picked up by
+    :func:`test_the_model_and_id_keys_forward_the_providers_own_string`, which
+    states the exception rather than leaving it implicit.
+
+    **Enforcement is uneven, and the unevenness is stated rather than averaged
+    over.** On the Class A keys the prohibition is mechanized: a planted marker
+    in ``outputs["status"]``, ``outputs["stop_reason"]`` or
+    ``choices[].finish_reason`` reds this test. On the three Class B source
+    fields it is enforced by length alone, so content arriving under the cap in
+    ``inputs["model"]``, ``outputs["model"]`` or ``outputs["id"]`` would violate
+    the clause with nothing red. That is the accepted residual **T-02-08-07**,
+    sized deliberately at plan 02-08's checkpoint.
     """
     offenders = sorted(
         f"{subject}:{key}={value!r}"
         for subject, attributes in _swept_attributes()
         for key, value in attributes.items()
-        for content in _CONTENT_STRINGS
+        for content in _FORBIDDEN_CONTENT
         if content in _rendered(value)
     )
     assert offenders == [], offenders
+
+
+def test_the_model_and_id_keys_forward_the_providers_own_string() -> None:
+    """The carve-out, asserted rather than assumed.
+
+    An exception nobody wrote down is indistinguishable from a leak nobody
+    noticed. SEM-03 requires ``gen_ai.request.model`` and ``gen_ai.response.model``
+    to carry the provider's own model string — an allowlist there would drop every
+    model this SDK has not heard of, which is every new model — and SEM-06
+    requires ``gen_ai.response.id`` to carry the provider's own opaque id, which
+    has no vocabulary by definition. So these three keys forward what was planted,
+    and that is the requirement, not a gap.
+
+    **This test passes both before and after the value constraints land, and that
+    is intended — do not "fix" it.** It is a characterization test pinning a
+    deliberate exception, not a defect control. If it ever goes red, a constraint
+    written for Class A has been applied to Class B and the SDK has started
+    dropping legitimate model names and response ids silently.
+
+    Every planted identifier is under the character cap (the longest is 39 code
+    points against a cap of 64), so what this test measures is the perimeter, not
+    ``semconv._bounded``.
+    """
+    attributes = semconv.map_span(_all_spans()["content_span"]).attributes
+    forwarded = {
+        "gen_ai.request.model": _FORWARDED_REQUEST_MODEL,
+        "gen_ai.response.model": _FORWARDED_RESPONSE_MODEL,
+        "gen_ai.response.id": _FORWARDED_RESPONSE_ID,
+    }
+    missing = sorted(
+        f"{key}={attributes.get(key)!r} does not carry {marker!r}"
+        for key, marker in forwarded.items()
+        if marker not in _rendered(attributes.get(key))
+    )
+    assert missing == [], missing
 
 
 def _rendered(value: Any) -> str:
