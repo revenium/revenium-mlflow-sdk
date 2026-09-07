@@ -46,8 +46,12 @@ import inspect
 from pathlib import Path
 
 import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 from revenium_mlflow.attributes import REVENIUM_ATTRIBUTE_KEYS
+from revenium_mlflow.config import ReveniumConfig
+from revenium_mlflow.errors import ConfigurationError
 from revenium_mlflow.tracing import (
     ReveniumAttributionSpanProcessor,
     ReveniumExportHandle,
@@ -168,11 +172,68 @@ def test_entering_attribution_sets_state_rather_than_yielding_silently() -> None
     assert dict(_scope.current()) == {}
 
 
-def test_configure_dual_export_raises_naming_phase_four() -> None:
-    """The install entry point must fail loudly, not report a phantom success."""
-    with pytest.raises(NotImplementedError) as excinfo:
-        configure_dual_export()
-    assert "Phase 4" in str(excinfo.value)
+class _RecordingBatchProcessor(BatchSpanProcessor):
+    """A ``BatchSpanProcessor`` that records the bound it was flushed with.
+
+    Subclassed rather than duck-typed so the handle's type annotation stays
+    honest, and constructed with no exporter argument at all — nothing here
+    exports, and a real exporter would open a socket this test has no use for.
+    """
+
+    def __init__(self) -> None:
+        """Record into an empty list. The base initialiser is deliberately not run.
+
+        ``BatchSpanProcessor.__init__`` starts a worker thread and allocates a
+        queue. This stub answers one method and is never attached to a provider,
+        so starting that machinery would be cost with no observation attached.
+        """
+        self.flushed_with: list[int] = []
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        """Record the bound and report success."""
+        self.flushed_with.append(timeout_millis)
+        return True
+
+
+def _stub_handle(*, batch_processor: BatchSpanProcessor | None = None) -> ReveniumExportHandle:
+    """A handle constructed without configuring anything.
+
+    ``configure_dual_export`` attaches to the *process-global* bridged provider
+    and ``add_span_processor`` cannot be undone, so a test about the handle's own
+    methods builds one directly rather than installing one it would then have to
+    live with for the rest of the session.
+    """
+    return ReveniumExportHandle(
+        provider=TracerProvider(),
+        attribution_processor=ReveniumAttributionSpanProcessor(),
+        batch_processor=batch_processor
+        if batch_processor is not None
+        else _RecordingBatchProcessor(),
+        config=ReveniumConfig(),
+    )
+
+
+def test_configure_dual_export_refuses_to_install_without_a_credential() -> None:
+    """The install entry point must fail loudly, not report a phantom success.
+
+    That sentence is why this test existed in Phase 1, when it asserted the
+    ``NotImplementedError``, and it is why the test is rewritten here rather than
+    deleted — the same treatment the scope test above got when plan 03-01
+    replaced its raise. Plan 04-01 implemented ``configure_dual_export``, so the
+    Phase 1 raise is gone; the failure it stood guard against is not.
+
+    The shape survives intact in the credential path, and it is the sharpest
+    remaining instance of it. Installing with no ``api_key`` would attach a fully
+    working pipeline whose every export is rejected remotely — and
+    OpenTelemetry's ``BatchSpanProcessor`` discards ``SpanExportResult.FAILURE``
+    without telling anyone, so the 401s reach no caller, no log and no metric.
+    The operator's first evidence would be an invoice missing every model call.
+    A ``ConfigurationError`` at configure time is the same "fail loudly rather
+    than report a phantom success" claim, made where it now applies.
+    """
+    with pytest.raises(ConfigurationError) as excinfo:
+        configure_dual_export(otlp_traces_endpoint="http://127.0.0.1:1/v1/traces")
+    assert "api_key" in str(excinfo.value)
 
 
 def test_configure_dual_export_returns_a_typed_handle_never_none() -> None:
@@ -181,14 +242,50 @@ def test_configure_dual_export_returns_a_typed_handle_never_none() -> None:
     assert annotation is ReveniumExportHandle
 
 
-def test_export_handle_exposes_its_three_methods_and_each_raises() -> None:
-    """CFG-06 and CFG-07 name ``is_active``, ``reinstall`` and ``flush`` explicitly."""
-    handle = ReveniumExportHandle()
+def test_export_handle_still_exposes_its_three_methods() -> None:
+    """CFG-06 and CFG-07 name ``is_active``, ``reinstall`` and ``flush`` explicitly.
+
+    All three are still present; what changed in plan 04-01 is which of them
+    answer. Asserted for presence here, because the surface is the contract —
+    behaviour belongs to the tests below and to
+    ``tests/unit/test_dual_export_gate.py``.
+    """
+    handle = _stub_handle()
     for method_name in ("is_active", "reinstall", "flush"):
-        method = getattr(handle, method_name)
+        assert callable(getattr(handle, method_name)), method_name
+
+
+def test_the_unimplemented_handle_methods_raise_and_name_their_owner() -> None:
+    """``is_active`` and ``reinstall`` belong to plan 04-04, and say so.
+
+    They raise rather than returning a plausible answer, which is the same
+    property Phase 1 asserted of all three. It matters most for ``is_active``: a
+    handle that reported itself active without checking would say the integration
+    is installed at exactly the moment MLflow's provider rebuild had evicted it —
+    the one question CFG-07 created the handle to be able to answer honestly.
+    """
+    handle = _stub_handle()
+    for method_name in ("is_active", "reinstall"):
         with pytest.raises(NotImplementedError) as excinfo:
-            method()
-        assert "Phase 4" in str(excinfo.value), method_name
+            getattr(handle, method_name)()
+        assert "04-04" in str(excinfo.value), method_name
+
+
+def test_flush_is_implemented_and_bounded_against_this_sdks_own_processor() -> None:
+    """T-04-05: the flush the handle performs is this SDK's, not the provider's.
+
+    ``TracerProvider.force_flush`` walks every attached processor under one
+    shared deadline and abandons the rest the moment it expires. This SDK's
+    processor is appended last and is therefore first to be starved, so a
+    provider-level flush would report ``False`` for a queue that was never
+    reached. The stub processor below returns a value no provider-level flush
+    would produce, which is what makes the delegation observable rather than
+    assumed.
+    """
+    processor = _RecordingBatchProcessor()
+    handle = _stub_handle(batch_processor=processor)
+    assert handle.flush(2.5) is True
+    assert processor.flushed_with == [2500]
 
 
 def test_the_span_processor_constructs_and_exposes_the_four_processor_methods() -> None:

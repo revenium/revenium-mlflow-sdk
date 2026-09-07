@@ -40,7 +40,9 @@ keeps the module out of the collection-time import race ``tests/conftest.py``
 records.
 """
 
+import contextlib
 import logging
+from collections.abc import Iterator
 
 import pytest
 from opentelemetry.context import Context
@@ -110,6 +112,48 @@ def _collect_one_scoped_span(processor: SpanProcessor) -> ReadableSpan:
     return collected
 
 
+#: The class MLflow attaches to the ``opentelemetry.sdk.trace`` logger to demote
+#: OpenTelemetry's own warnings. Matched by name rather than imported:
+#: ``mlflow.tracing.utils.warning`` is MLflow internals, and this module has no
+#: business importing MLflow at all.
+_LOG_DEMOTION_FILTER = "LogDemotionFilter"
+
+
+@contextlib.contextmanager
+def _without_mlflows_log_demotion() -> Iterator[None]:
+    """Detach MLflow's log-demotion filters for the duration of the block.
+
+    **Why this exists, and why it is not a workaround.** The assertion below
+    measures what *OpenTelemetry* does when an attribute is written to an ended
+    span. MLflow, the moment its tracing is initialised anywhere in the process,
+    installs ``LogDemotionFilter`` instances on the ``opentelemetry.sdk.trace``
+    logger — permanently, globally, as a side effect of an unrelated import. The
+    filters are exactly what the comment below already calls out: they are how a
+    real deployment loses even the one thread a debugger could pull on.
+
+    Without this, whether the assertion passes depends on whether some earlier
+    test module happened to touch MLflow — which is a fact about pytest's
+    alphabetical collection order, not about ATTR-02. Plan 04-01 added
+    ``tests/unit/test_dual_export_gate.py``, which sorts before this module and
+    does initialise MLflow, and that is what surfaced the latent dependency. The
+    filters are restored on exit so this block changes nothing for anything that
+    runs after it.
+    """
+    logger = logging.getLogger("opentelemetry.sdk.trace")
+    demoting = [
+        installed
+        for installed in logger.filters
+        if type(installed).__name__ == _LOG_DEMOTION_FILTER
+    ]
+    for installed in demoting:
+        logger.removeFilter(installed)
+    try:
+        yield
+    finally:
+        for installed in demoting:
+            logger.addFilter(installed)
+
+
 def test_the_on_end_write_is_silent_and_the_on_start_write_arrives(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -119,7 +163,10 @@ def test_the_on_end_write_is_silent_and_the_on_start_write_arrives(
     difference between the two runs is the callback the write happens in, and one
     of them loses it without raising.
     """
-    with caplog.at_level(logging.WARNING, logger="opentelemetry.sdk.trace"):
+    with (
+        _without_mlflows_log_demotion(),
+        caplog.at_level(logging.WARNING, logger="opentelemetry.sdk.trace"),
+    ):
         losing = OnEndWritingAttributionProcessor()
         lost = _collect_one_scoped_span(losing)
         kept = _collect_one_scoped_span(ReveniumAttributionSpanProcessor())
