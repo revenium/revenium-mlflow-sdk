@@ -35,6 +35,7 @@ _addressed_to_loopback`` asserts the negative directly off the captured requests
 import os
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -87,6 +88,13 @@ _SPAN_KIND_CLIENT = 3
 #: spans came from MLflow.
 _MLFLOW_SCOPE_NAME = "mlflow.tracing.provider"
 
+#: The transcript this run is pinned against. Resolved from this file rather
+#: than from the working directory, so the test means the same thing run from
+#: anywhere.
+_EVIDENCE_DOCUMENT = (
+    Path(__file__).resolve().parents[2] / "docs" / "verification" / "exp-03-dual-export.md"
+)
+
 
 @dataclass(frozen=True)
 class _Gate:
@@ -104,6 +112,12 @@ class _Gate:
 
     #: The collector's captured requests for the billable trace, decoded.
     exported: tuple[ExportedSpan, ...]
+
+    #: What ``FakeOTLPCollector.assert_received_export()`` said, or ``None`` when
+    #: it was satisfied. Captured rather than raised so a pipeline that stopped
+    #: exporting fails one named test loudly instead of erroring every test in
+    #: this module with the same message.
+    receipt_error: str | None
 
     #: The ``Host`` each captured request was addressed to, across every phase.
     hosts: tuple[str, ...]
@@ -212,6 +226,11 @@ def gate(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Gate]:
             flush_result = handle.flush(5.0)
 
             gate_requests = collector.requests
+            try:
+                collector.assert_received_export()
+                receipt_error: str | None = None
+            except AssertionError as failure:
+                receipt_error = str(failure)
             gate_exported = tuple(collector.exported_spans())
             gate_count = _store_span_count(mlflow, gate_trace_id)
 
@@ -241,6 +260,7 @@ def gate(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Gate]:
                 processors_after=processors_after,
                 flush_result=flush_result,
                 exported=gate_exported,
+                receipt_error=receipt_error,
                 hosts=collector.hosts + tuple(request.host for request in gate_requests),
                 content_type=headers.get("content-type"),
                 api_key_header=headers.get("x-api-key"),
@@ -277,6 +297,7 @@ def test_the_collector_received_a_decodable_export(gate: _Gate) -> None:
     This one fails when nothing arrived. Plan 04-01 Task 3 proves it can fail by
     removing the exporter's delegate call and capturing the red.
     """
+    assert gate.receipt_error is None, gate.receipt_error
     assert gate.exported, (
         "the collector captured no spans for the billable trace. Nothing else in "
         "this module is evidence of an export."
@@ -498,3 +519,74 @@ def test_the_orchestration_span_reached_mlflow_but_not_revenium(gate: _Gate) -> 
         f"from span names {[span.name for span in gate.mixed_exported]}"
     )
     assert [span.name for span in gate.mixed_exported] == [_MIXED_BILLABLE_SPAN]
+
+
+def _evidence_lines(gate: _Gate) -> list[str]:
+    """The facts this run measured, one per line, in the form the transcript carries.
+
+    Derived from the ``gate`` fixture rather than re-measured, so the document and
+    the assertions in this module are pinned to the *same* run. Values that carry
+    a wire encoding are rendered with their ``AnyValue`` oneof in parentheses:
+    "1000" and "1000 (int_value)" are different claims, and only the second one
+    is about the bytes.
+    """
+    import mlflow
+    from opentelemetry.sdk.version import __version__ as otel_sdk_version
+
+    span = gate.exported[0]
+
+    def attribute(key: str) -> str:
+        return f"span {key} = {span.attributes[key]} ({span.attribute_kinds[key]})"
+
+    return [
+        f"mlflow.__version__ = {mlflow.__version__}",
+        f"opentelemetry-sdk = {otel_sdk_version}",
+        f"store spans without configure_dual_export = {gate.baseline_store_span_count}",
+        f"store spans for the gate trace = {gate.gate_store_span_count}",
+        f"store spans for the mixed trace = {gate.mixed_store_span_count}",
+        f"exported spans for the gate trace = {len(gate.exported)}",
+        f"exported spans for the mixed trace = {len(gate.mixed_exported)}",
+        f"content-type = {gate.content_type}",
+        f"x-api-key = {gate.api_key_header}",
+        f"authorization = {gate.authorization_header}",
+        f"host = {gate.hosts[0]}",
+        f"span kind = {span.kind}",
+        f"instrumentation scope = {span.scope_name}",
+        f"resource telemetry.sdk.name = {span.resource_attributes['telemetry.sdk.name']}",
+        f"resource gen_ai.provider.name = {span.resource_attributes['gen_ai.provider.name']}",
+        f"resource gen_ai.system = {span.resource_attributes['gen_ai.system']}",
+        attribute("gen_ai.operation.name"),
+        attribute("gen_ai.provider.name"),
+        attribute("gen_ai.request.model"),
+        attribute("gen_ai.usage.input_tokens"),
+        attribute("gen_ai.usage.output_tokens"),
+        attribute("gen_ai.usage.cache_read_input_tokens"),
+        attribute("revenium.subscriber.id"),
+        attribute("revenium.organization.name"),
+        attribute("revenium.middleware.source"),
+        f"mixed trace exported span names = {[s.name for s in gate.mixed_exported]}",
+    ]
+
+
+def test_the_verification_document_records_what_this_run_measured(gate: _Gate) -> None:
+    """``docs/verification/exp-03-dual-export.md`` and this run stay one fact.
+
+    This project's evidence constraint requires command output behind a claim,
+    and that document carries it. A checked-in transcript rots the moment someone
+    upgrades MLflow or OpenTelemetry, and a rotted transcript is worse than none:
+    it reads as current evidence for a measurement nobody re-ran. The same
+    circularity gets the same treatment in ``tests/unit/test_stamp_time_evidence.py``
+    and ``tests/unit/test_semconv_cache_tokens.py``.
+
+    Whitespace is collapsed on both sides before comparison. The document formats
+    its dump for a human reader, and the formatting is not the fact.
+    """
+    document = _EVIDENCE_DOCUMENT.read_text(encoding="utf-8")
+    collapsed = " ".join(document.split())
+
+    missing = [line for line in _evidence_lines(gate) if " ".join(line.split()) not in collapsed]
+    assert missing == [], (
+        f"{_EVIDENCE_DOCUMENT.name} no longer records what this run measured. "
+        f"Absent from it: {missing}. Re-run the reproducer in its section 3 and paste "
+        "the new output, rather than editing the dump by hand."
+    )

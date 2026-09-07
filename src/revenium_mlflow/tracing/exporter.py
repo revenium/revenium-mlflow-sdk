@@ -96,6 +96,19 @@ def _resource_overlay() -> _Resource:
     The provider claim comes from :func:`semconv.resource_claim_attributes`
     rather than from a literal here, so the value the resource claims and the
     value the spans claim are the same string in one place.
+
+    **Open, and deliberately not closed here: ``telemetry.sdk.version``.** With
+    the name overridden and the version inherited, the exported resource reads
+    ``telemetry.sdk.name = "revenium-mlflow-sdk"`` alongside
+    ``telemetry.sdk.version = "3.16.0"`` — MLflow's version, under this SDK's
+    name, a pairing that is false and that this SDK has never shipped. Captured
+    in ``docs/verification/exp-03-dual-export.md`` §5. It is left alone rather
+    than quietly corrected because ``telemetry.sdk.version`` is a second
+    wire-facing value reaching a live Revenium endpoint, and plan 04-01 Task 1
+    made exactly that class of choice a ``gate="blocking-human"`` checkpoint. The
+    obvious fix is ``revenium_mlflow.__version__``; making it without review
+    would be the unreviewed wire change the checkpoint exists to prevent. A later
+    plan in this phase should put it to a human.
     """
     attributes: dict[str, str] = dict(_resource_claim_attributes())
     attributes[_TELEMETRY_SDK_NAME] = _RESOURCE_PROVIDER_CLAIM
