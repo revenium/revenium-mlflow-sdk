@@ -156,9 +156,19 @@ def test_product_name_is_documented_in_readme_and_shipped_metadata() -> None:
     The README heading is where a reader meets the name; the installed long
     description is where an installer does. Both are asserted because a rename
     that reaches only one of them is exactly the drift worth catching.
+
+    The assertion is on the *first ATX heading*, not on line 1. The Revenium
+    Labs banner image and status badges sit above the title, matching the
+    sibling Labs repositories. That is a layout fact, not a rename, and the
+    drift this test exists to catch is a rename — so the check follows the
+    heading rather than pinning a line number. Anything that precedes the
+    heading must still be non-heading markup: the first ``# `` line in the
+    file is the one asserted, so a second title inserted above would fail.
     """
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    assert readme.splitlines()[0].strip() == f"# {PRODUCT_NAME}"
+    headings = [line.strip() for line in readme.splitlines() if line.startswith("# ")]
+    assert headings, "README.md contains no top-level heading"
+    assert headings[0] == f"# {PRODUCT_NAME}"
     assert PRODUCT_NAME in (_installed_metadata()["Description"] or "")
 
 

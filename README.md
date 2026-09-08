@@ -1,3 +1,7 @@
+[![Revenium MLflow SDK — Revenium Labs](assets/mlflow-revenium-labs.png)](assets/mlflow-revenium-labs.png)
+
+[![Revenium Labs](https://img.shields.io/badge/Revenium-Labs-6f42c1?style=for-the-badge)](https://github.com/revenium/.github/blob/main/LABS.md) [![Status: Early development](https://img.shields.io/badge/status-early%20development-f0a020?style=for-the-badge)](#status)
+
 # Revenium MLflow SDK
 
 **Revenium-supported economic telemetry for MLflow-instrumented applications.**
@@ -9,7 +13,17 @@ MLflow Tracking Server, which remains the engineering system of record for traci
 experiments. Revenium becomes the authoritative rating source for the economics of those same
 traces.
 
-> This is a Revenium product. It is **neither part of, nor endorsed by, the MLflow project.**
+> ### 🧪 This is a Revenium Labs project
+>
+> **Revenium Labs** projects are field-developed, best-effort, beta-quality software shared in the open. They are **not** part of Revenium's officially supported products.
+>
+> * It may need adaptation for your environment.
+> * It's provided as-is, without the versioned-release guarantees, SLAs, or formal support that back our core products.
+> * Issues, feedback, and PRs are welcome. [Join us on Discord](https://discord.gg/J2DbmjZ2nA).
+>
+> → **[What is Revenium Labs?](https://github.com/revenium/.github/blob/main/LABS.md)**
+
+> This is a Revenium project. It is **neither part of, nor endorsed by, the MLflow project.**
 > MLflow is a trademark of its respective owners; this SDK is an independent integration built
 > entirely on MLflow's public extension points.
 
@@ -20,9 +34,10 @@ attribution, spend controls, and job ROI computed from the traces they are alrea
 
 ## Status
 
-Early development. This distribution is **not published to any package index**, and nothing here
-should be read as a claim of release or production readiness. Install it from a locally built
-artifact or from the working tree.
+Early development — earlier than the "beta" that Revenium Labs projects usually carry. This
+distribution is **not published to any package index**, and nothing here should be read as a claim
+of release or production readiness. Install it from a locally built artifact or from the working
+tree.
 
 ## Install
 
