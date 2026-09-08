@@ -60,6 +60,64 @@ Verify the install:
 The captured transcript for the build, the clean-environment install, and the editable install is
 committed at [`docs/verification/pkg-02-build-install.md`](docs/verification/pkg-02-build-install.md).
 
+## Quickstart
+
+The SDK attaches a second exporter to MLflow's existing tracer provider. Configure it once, after
+MLflow tracing is enabled, then wrap traced work in an `attribution()` scope.
+
+Set a metering key and a local OTLP/HTTP collector endpoint. Keep the key in the environment rather
+than in source code. The fake value below is intentional.
+
+```bash
+export REVENIUM_METERING_KEY="rev_mk_FAKE"
+export REVENIUM_OTLP_TRACES_ENDPOINT="http://127.0.0.1:4318/v1/traces"
+```
+
+```python
+import os
+
+import mlflow
+
+from revenium_mlflow import attribution, configure_dual_export
+
+handle = configure_dual_export(
+    api_key=os.environ["REVENIUM_METERING_KEY"],
+    otlp_traces_endpoint=os.environ["REVENIUM_OTLP_TRACES_ENDPOINT"],
+)
+
+with attribution(
+    organization_name="example-org",
+    subscriber_id="example-subscriber",
+):
+    with mlflow.start_span(name="quickstart-chat", span_type="CHAT_MODEL") as span:
+        span.set_attribute("mlflow.llm.model", "gpt-4o")
+        span.set_attribute("mlflow.llm.provider", "openai")
+        span.set_attribute(
+            "mlflow.chat.tokenUsage",
+            {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        )
+
+if not handle.flush(5.0):
+    raise RuntimeError("Revenium export did not finish within five seconds")
+
+mlflow.flush_trace_async_logging()
+```
+
+MLflow still writes the trace to its configured Tracking Server. The Revenium exporter sends the
+billable `CHAT_MODEL` span to the endpoint above with normalized `gen_ai.*` fields and the
+`revenium.*` attribution from the active scope.
+
+For a safe local proof using the repository's loopback collector, run:
+
+```bash
+.venv/bin/python -m pytest -q tests/unit/test_dual_export_gate.py
+```
+
+Do not call `configure_dual_export()` twice in the same process. This early build does not yet detect
+an existing installation, so a second call adds another exporter and sends every eligible span
+twice. MLflow can also rebuild its tracer provider after configuration; `handle.is_active()` and
+`handle.reinstall()` are not implemented yet.
+
 ## Typing
 
 The distribution supports PEP 561. Its `py.typed` marker tells type checkers to use the package's
