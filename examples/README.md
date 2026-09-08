@@ -1,18 +1,17 @@
 # Examples
 
-Runnable examples land in the documentation phase. This directory is created now so their location
-is fixed and referenceable from the README and the docs index.
+Runnable examples are planned for the documentation phase. This directory reserves a stable path
+for links from the README and documentation index.
 
 ## The rule every example follows
 
-**Every example runs against local fakes only.** No example sends traffic to Revenium production, to
-a customer environment, or to any hosted write endpoint, and no example contains a live credential.
+Every example must run against local fakes. Examples must not send traffic to Revenium production, a
+customer environment, or any hosted write endpoint. They must not contain live credentials.
 
-This is a correctness rule as much as a security one: this SDK sits on the billing path, so an
-example that writes to a live ingest endpoint does not merely leak — it writes billing data that
-someone is charged for.
+This rule protects billing correctness as well as security. Because the SDK sits on the billing
+path, an example that reaches a live ingest endpoint could create chargeable data.
 
-Concretely, an example may use:
+Examples may use:
 
 - A fake OTLP collector on `localhost` — stdlib `http.server` bound to port 0. The OTLP exporter
   uses `requests`, so httpx-level mocking cannot intercept it and a real local listener is needed.

@@ -22,28 +22,27 @@ We review and respond to security reports in a timely manner.
 
 ## Rules for contributors
 
-Two rules are absolute in this repository. Both exist because this SDK sits on the billing path: it
-carries the attribution that decides what a customer is charged, and it holds credentials scoped to
-write metering data.
+Two rules are absolute because this SDK sits on the billing path. It carries the attribution used to
+calculate customer charges and holds credentials that can write metering data.
 
 ### 1. No live credentials, anywhere
 
 No API key, authorization header, bearer token, or other live credential may appear in source code,
-test fixtures, documentation, examples, or any generated or captured artifact — including the
+test fixtures, documentation, examples, or any generated or captured artifact, including the
 evidence transcripts under `docs/verification/`.
 
 Use obviously fake placeholder values in anything committed. Read real credentials from the
 environment at runtime only. Where a credential could reach a log or an exception message, redact
-it; an API key that reaches a stack trace has been disclosed to everyone who can read the logs.
+it. An API key in a stack trace is exposed to everyone who can read the logs.
 
-A commit that adds a live credential is not fixed by a follow-up commit that removes it — the value
-remains in git history and must be treated as compromised and rotated.
+Removing a live credential in a later commit does not remove it from git history. Treat the
+credential as compromised and rotate it.
 
 ### 2. No calls to Revenium production, or to any hosted write endpoint
 
-Tests, examples, and development workflows must not send traffic to Revenium production, to a
-customer environment, or to any hosted write endpoint. This is not only a security rule: a test that
-writes to a live ingest endpoint corrupts real billing data.
+Tests, examples, and development workflows must not send traffic to Revenium production, a customer
+environment, or any hosted write endpoint. A test that reaches a live ingest endpoint can corrupt
+real billing data.
 
 Use local fakes instead:
 
@@ -54,10 +53,9 @@ Use local fakes instead:
 
 ## Reporting a suspicious dependency
 
-If a declared dependency fails to install or its name looks wrong, do not substitute a
-similarly-named package and do not retry with a different spelling. A failed install can indicate a
-typosquatted or hallucinated package name, and installing the nearest match is how that attack
-succeeds. Report it to `support@revenium.io` instead.
+If a declared dependency fails to install or its name looks wrong, do not substitute a package with
+a similar name or try a different spelling. The dependency may be typosquatted or nonexistent.
+Report it to `support@revenium.io` instead.
 
 ## Scope
 

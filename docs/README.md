@@ -1,7 +1,8 @@
 # Documentation
 
-Index of the documentation sets for the Revenium MLflow SDK. Most guide pages are written in a later
-phase; this page names them now so their eventual location is fixed and linkable.
+This index lists the current and planned documentation for the Revenium MLflow SDK. Most guides are
+scheduled for a later development phase; their planned locations are listed here so other documents
+can link to them consistently.
 
 ## Available now
 
@@ -12,7 +13,7 @@ phase; this page names them now so their eventual location is fixed and linkable
 
 ## Planned
 
-Written in the documentation phase, not yet present:
+These guides are planned but not yet present:
 
 | Document | Will cover |
 |---|---|
@@ -26,16 +27,14 @@ Written in the documentation phase, not yet present:
 
 ## Conventions for these documents
 
-**Evidence over assertion.** Anything stated here about what builds, installs, or interoperates is
-backed by a transcript in `verification/`. A claim without captured output proving it does not
-belong in this directory.
+Claims about builds, installation, or interoperability require a supporting transcript in
+`verification/`. Do not add one without captured command output.
 
-**No release language.** This package is not published to any package index and no CI has run for
-it. Documentation must not describe it as released, published, production-ready, or CI-verified.
+The package is not published to any package index, and CI has not run for it. Do not describe it as
+released, published, production-ready, or CI-verified.
 
-**No live credentials.** Examples in documentation use obviously fake placeholder values and run
-against local fakes. See [SECURITY.md](../SECURITY.md).
+Documentation examples must use obviously fake placeholder values and local fakes. See
+[SECURITY.md](../SECURITY.md).
 
-**Not an MLflow project document.** This SDK is a Revenium product, built entirely on MLflow's
-public extension points. It is neither part of, nor endorsed by, the MLflow project, and its
-documentation should not read as though it were.
+This SDK is a Revenium product built on MLflow's public extension points. It is neither part of nor
+endorsed by the MLflow project. The documentation must keep that distinction clear.
