@@ -62,6 +62,7 @@ is sqlite under ``tmp_path``, and the only credential is the
 ``rev_mk_SLOT_SENTINEL`` sentinel (T-04-03).
 """
 
+import ast
 import os
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
@@ -116,6 +117,12 @@ _CUSTOMER_TOKEN = "customer-only-token"
 _CUSTOMER_HEADER = "x-customer-token"
 
 _SPAN_NAME = "slot-chat"
+
+#: The environment write forms an AST walk must recognise. Names rather than
+#: syntax, because ``os.environ["X"] = y``, ``os.environ.setdefault(...)`` and
+#: ``os.putenv(...)`` are three spellings of one act.
+_WRITE_METHODS = frozenset({"setdefault", "update", "pop", "popitem", "clear"})
+_PUTENV_FUNCTIONS = frozenset({"putenv", "unsetenv"})
 
 #: ``cache_read_input_tokens`` is here because MLflow's own native dual export
 #: drops it. Its presence in the Revenium payload and its absence from the
@@ -641,6 +648,242 @@ def test_the_customers_own_token_reaches_only_their_collector(slot: _Slot) -> No
     """
     assert _header_hits(slot.customer_requests, _CUSTOMER_TOKEN)
     assert _header_hits(slot.revenium_requests, _CUSTOMER_TOKEN) == []
+
+
+# --------------------------------------------------------------------------
+# The mechanical guard: no module in the package writes an OTEL variable.
+# --------------------------------------------------------------------------
+
+
+def iter_package_modules(root: Path) -> Iterator[Path]:
+    """Yield every ``.py`` file under ``root``, deepest paths included.
+
+    Discovery by traversal rather than by a hand-maintained list, and over what
+    is on disk rather than over an imported package: a module added in Phase 5 or
+    6 is covered the day it lands, and an import-time condition cannot hide one.
+    """
+    yield from sorted(root.rglob("*.py"))
+
+
+def _environ_root(node: ast.expr) -> bool:
+    """Whether ``node`` is an environment mapping — ``os.environ`` or a bare ``environ``.
+
+    Both spellings, because ``from os import environ`` is one import away and a
+    guard that only knew the dotted form would be defeated by it.
+    """
+    if isinstance(node, ast.Attribute):
+        return node.attr == "environ"
+    return isinstance(node, ast.Name) and node.id == "environ"
+
+
+def _guarded_name(node: ast.expr) -> str | None:
+    """The variable name a subscript targets, when it is a guarded one.
+
+    Returns ``None`` for a non-literal subscript — ``os.environ[name]`` where
+    ``name`` is computed. That case is reported by
+    :func:`_scan_environment_writes` as an unnamed write instead, because a
+    computed key is *more* suspicious than a literal one, not less.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _first_argument_name(node: ast.Call) -> str | None:
+    """The literal name a mutating call targets, or ``None``.
+
+    ``None`` covers both "no argument" (``os.environ.clear()``) and "computed
+    argument" (``os.environ.setdefault(name, ...)``). Both are treated as
+    *guarded* by :func:`_guarded_writes` — an unnamed write is more suspicious
+    than a named one, not less.
+    """
+    if not node.args:
+        return None
+    return _guarded_name(node.args[0])
+
+
+def _guarded_writes(findings: list[str]) -> list[str]:
+    """Narrow a scan result to the writes CFG-03 actually forbids.
+
+    Kept as a separate step from the scan, because the scan is deliberately
+    broader than the prohibition. Two rules:
+
+    *An ``OTEL_``-named target is guarded.* That is the prohibition.
+
+    *An unnamed target is guarded.* A computed key could be an OTEL name, and
+    a guard that assumed otherwise would be defeated by one f-string.
+
+    *An ``MLFLOW_``-named target is not.* Plan 04-07 has to set MLflow's
+    isolated-ID-generator variable. A blanket prohibition would either block
+    that plan or get widened in a hurry by whoever hit it — and a wall widened
+    under deadline pressure is how this one would stop meaning anything. So the
+    narrowing is written down here, once, ahead of the plan that needs it,
+    rather than negotiated later.
+    """
+    guarded: list[str] = []
+    for finding in findings:
+        target = finding.rsplit(" ", 1)[-1]
+        if target == "None" or target.startswith(_OTEL_PREFIX):
+            guarded.append(finding)
+    return guarded
+
+
+def _scan_environment_writes(path: Path) -> list[str]:
+    """Report every write into the process environment in one file.
+
+    Four counted forms, which are four spellings of one act:
+
+    1. ``os.environ["X"] = y`` — subscript assignment.
+    2. ``del os.environ["X"]`` — subscript deletion.
+    3. ``os.environ.setdefault(...)`` / ``.update(...)`` / ``.pop(...)`` and
+       friends — mutating methods on the mapping.
+    4. ``os.putenv(...)`` / ``os.unsetenv(...)`` — the C-level family.
+
+    Written as an AST walk rather than a text search, and that is the instrument
+    choice this guard depends on. ``install.py`` and ``config.py`` have
+    documented this prohibition in their own docstrings since Phase 1 and must
+    keep documenting it; a text search would match the explanation. An AST walk
+    sees assignments and never sees prose.
+
+    Returns:
+        One string per finding, ``path:lineno form target``, so a failure points
+        at the line. Every finding is reported rather than the first, because a
+        guard that reports one of three is a guard someone fixes three times.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    findings: list[tuple[int, str]] = []
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Subscript) and _environ_root(target.value):
+                    findings.append((target.lineno, f"assign {_guarded_name(target.slice)}"))
+        elif isinstance(node, ast.Delete):
+            findings += [
+                (target.lineno, f"delete {_guarded_name(target.slice)}")
+                for target in node.targets
+                if isinstance(target, ast.Subscript) and _environ_root(target.value)
+            ]
+        elif isinstance(node, ast.Call):
+            function = node.func
+            if not isinstance(function, ast.Attribute):
+                continue
+            if function.attr in _WRITE_METHODS and _environ_root(function.value):
+                findings.append((node.lineno, f"{function.attr}() {_first_argument_name(node)}"))
+            elif function.attr in _PUTENV_FUNCTIONS:
+                # No root check: ``os.putenv`` and ``putenv`` bypass the mapping
+                # entirely, so there is nothing to root the call at. The name
+                # alone is the finding.
+                findings.append((node.lineno, f"{function.attr}() {_first_argument_name(node)}"))
+
+    return [f"{path}:{lineno} {form}" for lineno, form in sorted(findings)]
+
+
+def test_the_write_scanner_detects_a_planted_violation(tmp_path: Path) -> None:
+    """The scanner finds what it claims to find, in all four forms.
+
+    Without this, the guard below is satisfied equally well by a scanner that
+    returns an empty list for every input — which is exactly how a wall like
+    this rots. This repository has been here before: Phase 1's private-access
+    wall shipped exempting by basename, so a module escaped it and the full gate
+    ran green with two live violations.
+
+    Planted in ``tmp_path`` for the *unit* control, so this test needs no
+    working-tree edit. The plant-and-revert against a real shipped module is
+    captured in ``docs/verification/cfg-03-env-untouched.md``, because a
+    temporary file cannot prove the walk covers the package.
+    """
+    planted = tmp_path / "planted.py"
+    planted.write_text(
+        "import os\n"
+        'os.environ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = "https://example.invalid"\n'
+        'del os.environ["OTEL_EXPORTER_OTLP_TRACES_HEADERS"]\n'
+        'os.environ.setdefault("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc")\n'
+        'os.putenv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "x-api-key=leaked")\n',
+        encoding="utf-8",
+    )
+
+    findings = _scan_environment_writes(planted)
+
+    assert len(findings) == 4, findings
+    forms = [finding.split(" ", 1)[1] for finding in findings]
+    assert forms[0] == "assign OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
+    assert forms[1] == "delete OTEL_EXPORTER_OTLP_TRACES_HEADERS"
+    assert forms[2] == "setdefault() OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"
+    assert forms[3] == "putenv() OTEL_EXPORTER_OTLP_TRACES_HEADERS"
+    for finding in findings:
+        path, _, rest = finding.partition(":")
+        assert path.endswith("planted.py")
+        assert rest.split()[0].isdigit(), f"no line number in {finding!r}"
+
+
+def test_no_module_in_the_package_writes_an_otel_variable() -> None:
+    """The guard itself, over every module discovered by traversal.
+
+    Reported as a mapping so a failure names every offending module and line at
+    once rather than the first one the walk happened to reach.
+    """
+    modules = list(iter_package_modules(_PACKAGE_ROOT))
+
+    assert modules, f"scanned nothing under {_PACKAGE_ROOT} — the walk is broken"
+    assert len(modules) >= 10, f"only {len(modules)} modules scanned; the walk looks truncated"
+
+    writes = {str(path): _guarded_writes(_scan_environment_writes(path)) for path in modules}
+    assert not any(writes.values()), {path: found for path, found in writes.items() if found}
+
+
+def test_a_write_into_the_mlflow_namespace_is_permitted(tmp_path: Path) -> None:
+    """MLflow-namespace writes pass the guard, and that is asserted rather than assumed.
+
+    Plan 04-07 has to set MLflow's isolated-ID-generator variable, so the guard
+    is narrowed to the OTEL namespace *now*, ahead of the plan that needs it. A
+    blanket prohibition would either block 04-07 or get widened in a hurry by
+    whoever hit it — and a wall widened under deadline pressure is how this one
+    would stop meaning anything.
+
+    Both halves are asserted on one planted file: the scanner **sees** the
+    MLflow write, so the narrowing is a filter rather than a blind spot, and the
+    guard **permits** it. Asserting only the second would pass against a scanner
+    that saw nothing at all.
+    """
+    planted = tmp_path / "mlflow_write.py"
+    planted.write_text(
+        "import os\n"
+        'os.environ["MLFLOW_SPAN_ID_GENERATOR"] = "isolated"\n'
+        'os.environ.setdefault("MLFLOW_TRACKING_URI", "sqlite:///local.db")\n',
+        encoding="utf-8",
+    )
+
+    findings = _scan_environment_writes(planted)
+
+    assert len(findings) == 2, findings
+    assert "MLFLOW_SPAN_ID_GENERATOR" in findings[0]
+    assert "MLFLOW_TRACKING_URI" in findings[1]
+    assert _guarded_writes(findings) == []
+
+
+def test_a_computed_key_is_guarded_even_though_its_name_is_unknown(tmp_path: Path) -> None:
+    """An unnamed write counts as guarded, so one f-string cannot defeat the wall.
+
+    ``os.environ[f"OTEL_{suffix}"] = value`` leaves no literal target for the
+    scan to read. Treating that as "not an OTEL write" would leave the whole
+    guard one interpolation away from useless, so the unknown case is guarded
+    rather than exempt: a false positive here costs a reviewable conversation,
+    a false negative costs a leaked credential.
+    """
+    planted = tmp_path / "computed.py"
+    planted.write_text(
+        "import os\n"
+        "suffix = 'EXPORTER_OTLP_TRACES_HEADERS'\n"
+        'os.environ[f"OTEL_{suffix}"] = "x-api-key=leaked"\n',
+        encoding="utf-8",
+    )
+
+    findings = _scan_environment_writes(planted)
+
+    assert len(findings) == 1, findings
+    assert findings[0].endswith("assign None")
+    assert _guarded_writes(findings) == findings
 
 
 # --------------------------------------------------------------------------

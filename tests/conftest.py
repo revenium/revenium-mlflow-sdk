@@ -28,6 +28,68 @@ _MLFLOW_QUIET_ENV = {
 #: the whole session by the fixture below.
 _REVENIUM_ENV_PREFIX = "REVENIUM_"
 
+#: pytest's own per-test bookkeeping variable. Excluded from the session
+#: environment comparison below because pytest owns it and rewrites it before
+#: every setup and teardown — it is never evidence about a test module's
+#: hygiene, which is what that comparison is for. Named as a single exclusion
+#: rather than a prefix pattern, so a second one would have to be added
+#: deliberately.
+_PYTEST_BOOKKEEPING = frozenset({"PYTEST_CURRENT_TEST"})
+
+
+def _environment_without_pytest_bookkeeping() -> dict[str, str]:
+    """The process environment, minus the variables pytest itself manages."""
+    return {name: value for name, value in os.environ.items() if name not in _PYTEST_BOOKKEEPING}
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _the_session_leaves_the_environment_as_it_found_it() -> Iterator[None]:
+    """Assert the whole process environment is unchanged across the session.
+
+    Added by plan 04-02. Several test modules in Phase 4 set, clear and restore
+    environment variables — ``OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`` most
+    consequentially, because MLflow reads it at provider initialisation and a
+    leaked value silently reconfigures every module that runs afterwards. Each of
+    those modules restores what it touched in its own fixture, which is the right
+    place for it. This is the check that the restoration actually happened.
+
+    **Defined first in this file on purpose.** Session-scoped autouse fixtures
+    finalise in reverse order of setup, so declaring this one before the two
+    mutating fixtures below means it snapshots before they change anything and
+    compares after they have put it back. Declared last, it would compare
+    against their mutations and pass while measuring nothing.
+
+    The failure surfaces as a teardown error naming the variables that differ,
+    which is a worse report than a failing test and still far better than the
+    alternative: a suite whose results depend on module collection order, which
+    is how plan 04-01 spent a cycle on
+    ``tests/unit/test_on_start_not_on_end.py``.
+
+    **It was shown able to fail on its first run**, which is worth recording
+    because a green environment check is otherwise indistinguishable from a
+    check that compares nothing: it reported
+    ``Changed: {'PYTEST_CURRENT_TEST': (...)}``. That variable is pytest's own
+    per-test bookkeeping and is excluded by
+    :func:`_environment_without_pytest_bookkeeping`; nothing else differed.
+    """
+    before = _environment_without_pytest_bookkeeping()
+    yield
+    after = _environment_without_pytest_bookkeeping()
+
+    added = {name: after[name] for name in after.keys() - before.keys()}
+    removed = sorted(before.keys() - after.keys())
+    changed = {
+        name: (before[name], after[name])
+        for name in before.keys() & after.keys()
+        if before[name] != after[name]
+    }
+    assert (added, removed, changed) == ({}, [], {}), (
+        "the test session did not leave the environment as it found it. "
+        f"Added: {added}. Removed: {removed}. Changed: {changed}. "
+        "Some module's fixture set a variable without restoring it, and every "
+        "module that ran after it was configured by that leak."
+    )
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _clear_revenium_environment() -> Iterator[None]:

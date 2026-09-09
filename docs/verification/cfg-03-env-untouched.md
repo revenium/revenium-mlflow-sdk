@@ -261,3 +261,91 @@ silently.
   processor eviction are plan 04-04. Two calls still attach two pipelines.
 - **Nothing about a malformed endpoint.** URL well-formedness and the general
   double-suffix diagnosis are EXP-05, plan 04-05.
+
+## 8. Plant and revert: the guard is shown able to fail
+
+A test asserting "we do not do X" is worth only as much as the demonstration
+that it would notice X. This repository has been here before: Phase 1's
+private-access wall shipped exempting by *basename*, so a module escaped it and
+the full gate ran green with two live violations. The plant-and-revert below is
+therefore not optional, and this transcript is its evidence.
+
+**The plant.** One line in a real shipped module — the shortcut CFG-03 exists
+to close, written the way somebody in a hurry would write it. Inserted in
+`src/revenium_mlflow/tracing/install.py` immediately before the exporter is
+constructed:
+
+```python
+# PLANTED VIOLATION — plan 04-02 Task 3 control subject. Reverted immediately.
+import os
+
+os.environ["OTEL_EXPORTER_OTLP_TRACES_HEADERS"] = f"x-api-key={resolved.api_key}"
+```
+
+**The red run.**
+
+```
+FAILED tests/unit/test_otel_slot_untouched.py::test_the_namespace_is_byte_identical_when_it_was_unset
+FAILED tests/unit/test_otel_slot_untouched.py::test_absence_is_asserted_separately_from_equality
+FAILED tests/unit/test_otel_slot_untouched.py::test_the_namespace_is_byte_identical_when_the_customer_had_already_set_it
+FAILED tests/unit/test_otel_slot_untouched.py::test_the_credential_never_reaches_the_headers_variable
+FAILED tests/unit/test_otel_slot_untouched.py::test_the_credential_appears_in_no_request_the_customer_received
+FAILED tests/unit/test_otel_slot_untouched.py::test_the_customers_own_token_reaches_only_their_collector
+FAILED tests/unit/test_otel_slot_untouched.py::test_no_module_in_the_package_writes_an_otel_variable
+7 failed, 13 passed
+```
+
+**The AST walk named the module and the line**, which is the part that makes a
+failure actionable rather than merely loud:
+
+```
+{'.../src/revenium_mlflow/tracing/install.py':
+   ['.../src/revenium_mlflow/tracing/install.py:345 assign OTEL_EXPORTER_OTLP_TRACES_HEADERS']}
+```
+
+**Three of those seven failures are the reason the requirement exists**, and
+they are worth reading individually because each is a different consequence of
+one line:
+
+| Failing test | What it caught |
+|---|---|
+| `test_the_namespace_is_byte_identical_when_it_was_unset` | `OTEL_EXPORTER_OTLP_TRACES_HEADERS: None != 'x-api-key=rev_mk_SLOT_SENTINEL'` — a variable that was absent is now set. |
+| `test_the_credential_appears_in_no_request_the_customer_received` | `[('x-api-key', 'rev_mk_SLOT_SENTINEL')] != []` — the Revenium credential **actually arrived at the customer's collector**, captured off the socket. The leak is not hypothetical. |
+| `test_the_customers_own_token_reaches_only_their_collector` | The customer's own `x-customer-token` reached nobody. Writing the single-valued variable did not add a header — it **replaced** the customer's authentication with Revenium's. |
+
+That third row is the one worth remembering. The obvious harm is that Revenium's
+key leaks outward; the harm nobody would have predicted is that the customer's
+own collector stops authenticating, because there is exactly one slot and the
+SDK took it.
+
+**The revert.** The planted line was removed and the module restored to its
+committed state (`git diff` clean against `HEAD`), then:
+
+```
+20 passed
+```
+
+**Why an AST walk and not a text search.** `install.py` and `config.py` have
+documented this prohibition in their own docstrings since Phase 1 and must keep
+documenting it — a text search for `os.environ[` would match the explanation
+and report a violation in the file that explains the rule. An AST walk sees
+assignments and never sees prose. That is why it is the right instrument here
+and not merely the fancier one.
+
+**What the guard permits, deliberately.** The scan reports *every* environment
+write; `_guarded_writes` then narrows to the OTEL namespace and to writes whose
+target name cannot be read statically. `MLFLOW_*` writes pass, because plan
+04-07 has to set MLflow's isolated-ID-generator variable — the narrowing is
+written down now, ahead of the plan that needs it, rather than negotiated under
+deadline pressure later. Both halves are asserted:
+`test_a_write_into_the_mlflow_namespace_is_permitted` proves the scan *sees* the
+MLflow write and the guard lets it through, and
+`test_a_computed_key_is_guarded_even_though_its_name_is_unknown` proves an
+f-string target does not slip past.
+
+**Coverage is by traversal, not by a list.** `iter_package_modules` walks
+`src/revenium_mlflow/**/*.py` on disk, so a module added in Phase 5 or 6 is
+covered the day it lands, and an import-time condition cannot hide one. The
+guard asserts it scanned at least ten modules, so a broken walk fails loudly
+instead of passing over an empty result — which is precisely how the Phase 1
+wall rotted.
