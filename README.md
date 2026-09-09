@@ -73,6 +73,58 @@ export REVENIUM_METERING_KEY="rev_mk_FAKE"
 export REVENIUM_OTLP_TRACES_ENDPOINT="http://127.0.0.1:4318/v1/traces"
 ```
 
+### In an application, with MLflow autolog
+
+This is the shape a real integration takes. The application makes its normal inference call and
+sets no span attributes.
+
+Requires the provider client library. It is not a dependency of this package.
+
+```python
+import os
+
+import mlflow
+import openai
+
+from revenium_mlflow import attribution, configure_tracing
+
+mlflow.openai.autolog()
+
+handle = configure_tracing(
+    api_key=os.environ["REVENIUM_METERING_KEY"],
+    otlp_traces_endpoint=os.environ["REVENIUM_OTLP_TRACES_ENDPOINT"],
+)
+
+with attribution(
+    organization_name="example-org",
+    subscriber_id="example-subscriber",
+):
+    openai.OpenAI().chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": "Where is my order?"}],
+    )
+
+if not handle.flush(5.0):
+    raise RuntimeError("Revenium export did not finish within five seconds")
+
+mlflow.flush_trace_async_logging()
+```
+
+MLflow's autolog creates the `CHAT_MODEL` span and reads token counts from the provider response,
+including the prompt-cache counts that Anthropic and Bedrock report
+(`mlflow/anthropic/autolog.py`). MLflow ships autolog for `anthropic`, `autogen`, `bedrock`,
+`crewai`, `dspy`, `gemini`, `groq`, `langchain`, `litellm`, `llama_index`, `mistral`, `openai`,
+`pydantic_ai`, `semantic_kernel` and `smolagents`.
+
+This block has no captured transcript in `docs/verification/`. Running it needs a provider
+credential and a network call, which this repository does not make. Treat it as the documented
+shape, not a verified one.
+
+### Without a provider credential
+
+The block below builds the same span shape by hand so the export path can be exercised with no
+credentials. An application does not write these attributes; autolog writes them.
+
 ```python
 import os
 
@@ -103,9 +155,10 @@ if not handle.flush(5.0):
 mlflow.flush_trace_async_logging()
 ```
 
-MLflow still writes the trace to its configured Tracking Server. The Revenium exporter sends the
-billable `CHAT_MODEL` span to the endpoint above with normalized `gen_ai.*` fields and the
-`revenium.*` attribution from the active scope.
+In both cases MLflow still writes the trace to its configured Tracking Server. The Revenium
+exporter sends the billable `CHAT_MODEL` span to the endpoint above with normalized `gen_ai.*`
+fields and the `revenium.*` attribution from the active scope. Orchestration spans in the same
+trace are not exported.
 
 For a safe local proof using the repository's loopback collector, run:
 
