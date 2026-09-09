@@ -69,9 +69,32 @@ Set a metering key and a local OTLP/HTTP collector endpoint. Keep the key in the
 than in source code. The fake value below is intentional.
 
 ```bash
-export REVENIUM_METERING_KEY="rev_mk_FAKE"
+export REVENIUM_METERING_API_KEY="rev_mk_FAKE"
 export REVENIUM_OTLP_TRACES_ENDPOINT="http://127.0.0.1:4318/v1/traces"
 ```
+
+`REVENIUM_METERING_API_KEY` is the same variable the other Revenium SDKs read, so a machine already
+running one of them needs no second export.
+
+To point at a non-production Revenium deployment, set the base URL instead of the full endpoint and
+the SDK composes the OTLP traces route onto it — again the same variable the other Revenium SDKs
+use:
+
+```bash
+export REVENIUM_METERING_BASE_URL="https://your-deployment.example.com"
+# resolves to https://your-deployment.example.com/meter/v2/otlp/v1/traces
+```
+
+The endpoint resolves argument first, then `REVENIUM_OTLP_TRACES_ENDPOINT`, then
+`REVENIUM_METERING_BASE_URL` composed, then the default `https://api.revenium.io/meter/v2/otlp/v1/traces`.
+Setting `REVENIUM_METERING_BASE_URL` to something that is already a full `/v1/traces` endpoint
+raises a `ConfigurationError` rather than composing a doubled suffix.
+
+The SDK never reads or writes `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or
+`OTEL_EXPORTER_OTLP_TRACES_HEADERS`. Those are process-global and single-valued, and they belong to
+your own collector configuration; the Revenium exporter carries its endpoint and its credential on
+its own instance. Captured proof is in
+[`docs/verification/cfg-03-env-untouched.md`](docs/verification/cfg-03-env-untouched.md).
 
 ### In an application, with MLflow autolog
 
@@ -91,7 +114,7 @@ from revenium_mlflow import attribution, configure_tracing
 mlflow.openai.autolog()
 
 handle = configure_tracing(
-    api_key=os.environ["REVENIUM_METERING_KEY"],
+    api_key=os.environ["REVENIUM_METERING_API_KEY"],
     otlp_traces_endpoint=os.environ["REVENIUM_OTLP_TRACES_ENDPOINT"],
 )
 
@@ -133,7 +156,7 @@ import mlflow
 from revenium_mlflow import attribution, configure_tracing
 
 handle = configure_tracing(
-    api_key=os.environ["REVENIUM_METERING_KEY"],
+    api_key=os.environ["REVENIUM_METERING_API_KEY"],
     otlp_traces_endpoint=os.environ["REVENIUM_OTLP_TRACES_ENDPOINT"],
 )
 
