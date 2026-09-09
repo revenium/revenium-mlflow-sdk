@@ -6,10 +6,48 @@ can link to them consistently.
 
 ## Available now
 
-| Path | Contents |
+[`verification/`](verification/) holds captured command output backing every build, install,
+compatibility, and behavioural claim this repository makes. Each file is a transcript, not a
+description of one: the fenced blocks are verbatim stdout and stderr of the command shown
+immediately above them.
+
+Several of these documents exist to show a check **failing** as well as passing. A guard that has
+never been observed to go red proves nothing, so where a document claims one, it carries the
+plant-and-revert transcript alongside the green one.
+
+### Phase 01 — packaging, typed surface, and the `_compat` wall
+
+| Document | What it proves |
 |---|---|
-| [`verification/`](verification/) | Captured command output backing every build, install, and compatibility claim this repository makes |
-| [`verification/pkg-02-build-install.md`](verification/pkg-02-build-install.md) | Build of the wheel and sdist, `py.typed` in both artifacts, clean-environment install, PEP 503 normalized name resolution, concurrent-install determinism, and the editable install |
+| [`pkg-02-build-install.md`](verification/pkg-02-build-install.md) | Wheel and sdist build, `py.typed` present in both artifacts, clean-environment install, PEP 503 normalized name resolution, concurrent-install determinism, and the editable install |
+| [`ver-06-gate.md`](verification/ver-06-gate.md) | Formatting, linting, and strict type checking pass — behind a gate shown able to fail, since a check configured so it cannot fail also produces a green transcript |
+| [`ver-07-version-matrix.md`](verification/ver-07-version-matrix.md) | The suite run across four interpreter-and-MLflow combinations, with the resolved version printed on each leg |
+| [`ver-08-plant-and-revert.md`](verification/ver-08-plant-and-revert.md) | The private-access wall detecting a real planted breach, not merely reporting a clean tree |
+| [`pkg-09-import-purity.md`](verification/pkg-09-import-purity.md) | Importing the SDK opens no socket and installs no global tracing state |
+
+### Phase 02 — span eligibility and GenAI semantic conventions
+
+| Document | What it proves |
+|---|---|
+| [`sem-05-cache-token-ab.md`](verification/sem-05-cache-token-ab.md) | MLflow *collects* prompt-cache token counts and its own OTLP translator discards them — the side-by-side A/B that is a large part of why this SDK exists |
+
+### Phase 03 — attribution context and span processor
+
+| Document | What it proves |
+|---|---|
+| [`attr-02-stamp-time.md`](verification/attr-02-stamp-time.md) | A span's eligibility is not knowable when `on_start` runs, measured across all three MLflow span-creation paths; and that an attribute written in `on_end` is lost with a single log line as the only signal |
+
+### Phase 04 — Revenium-owned OTLP export and the install gate
+
+| Document | What it proves |
+|---|---|
+| [`exp-03-dual-export.md`](verification/exp-03-dual-export.md) | One MLflow trace reaching both a Tracking Server store and an OTLP collector in a single run, asserted on the decoded protobuf rather than on a mock call |
+
+### Fixes verified outside a phase
+
+| Document | What it proves |
+|---|---|
+| [`cr-01-provider-cap.md`](verification/cr-01-provider-cap.md) | The emitted provider value shown unbounded — reaching the billing wire at any length — and then bounded, with the boundary asserted on both sides |
 
 ## Planned
 
