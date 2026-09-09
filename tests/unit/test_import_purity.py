@@ -230,7 +230,7 @@ provider.add_span_processor(object())
 """
 
 #: The same call, deferred into a function body — the D-12 design, and what
-#: Phase 4's real ``configure_dual_export`` will look like.
+#: Phase 4's real ``configure_tracing`` will look like.
 _CLEAN_DEFERRED = """
 from opentelemetry.sdk.trace import TracerProvider
 
@@ -271,7 +271,7 @@ if os.environ.get("SOMETHING"):
 try:
     import revenium_mlflow
 
-    revenium_mlflow.configure_dual_export()
+    revenium_mlflow.configure_tracing()
 except ImportError:
     pass
 """
@@ -303,14 +303,14 @@ _REGISTRATION_CALLS = frozenset(
         "set_destination",
         # This package's own configuration entry point (D-12: configure time,
         # never import time).
-        "configure_dual_export",
+        "configure_tracing",
     }
 )
 
 #: Nodes whose bodies are *deferred*: compiled when the module is imported, but
 #: executed later, or never. The scan stops at their boundary, because a
 #: deferred registration call is exactly the D-12 design — Phase 4's real
-#: ``configure_dual_export`` will contain one — and a scanner that flagged it
+#: ``configure_tracing`` will contain one — and a scanner that flagged it
 #: would be deleted rather than fixed.
 #:
 #: Everything else under a module-scope statement runs during the import and
@@ -413,7 +413,7 @@ def test_the_scanner_ignores_a_deferred_registration_call(tmp_path: Path) -> Non
     """A deferred call is the D-12 design, not a violation.
 
     A scanner that flagged it would fire on the real Phase 4 implementation of
-    ``configure_dual_export``, and would be deleted rather than fixed.
+    ``configure_tracing``, and would be deleted rather than fixed.
     """
     subject = tmp_path / "clean_deferred.py"
     subject.write_text(_CLEAN_DEFERRED, encoding="utf-8")
@@ -438,7 +438,7 @@ def test_a_conditional_registration_cannot_hide_from_the_scanner(tmp_path: Path)
     assert all("dirty_conditional.py" in finding for finding in findings)
     assert [finding.rsplit(" ", 1)[1] for finding in findings] == [
         "set_tracer_provider",
-        "configure_dual_export",
+        "configure_tracing",
     ], findings
 
 

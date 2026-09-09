@@ -70,7 +70,7 @@ class ReveniumAttributionSpanProcessor(SpanProcessor):
     normally *and* the value is absent from the collected span.
 
     The class is public because the contract names it: an advanced user may
-    register it on a tracer provider they own. :func:`configure_dual_export`
+    register it on a tracer provider they own. :func:`configure_tracing`
     remains the supported entry point for everyone else.
     """
 

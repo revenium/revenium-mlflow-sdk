@@ -78,9 +78,9 @@ import os
 
 import mlflow
 
-from revenium_mlflow import attribution, configure_dual_export
+from revenium_mlflow import attribution, configure_tracing
 
-handle = configure_dual_export(
+handle = configure_tracing(
     api_key=os.environ["REVENIUM_METERING_KEY"],
     otlp_traces_endpoint=os.environ["REVENIUM_OTLP_TRACES_ENDPOINT"],
 )
@@ -113,7 +113,7 @@ For a safe local proof using the repository's loopback collector, run:
 .venv/bin/python -m pytest -q tests/unit/test_dual_export_gate.py
 ```
 
-Do not call `configure_dual_export()` twice in the same process. This early build does not yet detect
+Do not call `configure_tracing()` twice in the same process. This early build does not yet detect
 an existing installation, so a second call adds another exporter and sends every eligible span
 twice. MLflow can also rebuild its tracer provider after configuration; `handle.is_active()` and
 `handle.reinstall()` are not implemented yet.

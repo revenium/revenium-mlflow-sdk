@@ -10,11 +10,24 @@ re-derives the key lines from a live run on every `pytest` invocation and fails 
 this file no longer contains them, so the transcript cannot rot into false
 evidence while the suite stays green.
 
+> **Post-capture note (2026-09-09).** The entry point this file names was renamed
+> `configure_dual_export` → `configure_tracing`. The 2026-09-07 run therefore executed
+> a script that spelled it the former way. Three occurrences were updated so the
+> reproducer in §3 still runs and the §4 dump still matches a live run — §1's claim,
+> the §3 snippet, and the `store spans without configure_tracing` label in §4 — and
+> nothing else. No captured `pytest` output in §5 or §6 contains the name, so no verbatim
+> transcript line was touched. The measured value behind the updated label is unchanged at
+> `1`, and `test_the_verification_document_records_what_this_run_measured` re-derives it
+> from a live run on every `pytest` invocation, which is what proves the label is not a
+> hand-edit that drifted. The rename is recorded in
+> `src/revenium_mlflow/tracing/install.py`; "dual export" in this file's title and
+> filename describes the *topology* — one trace, two destinations — which is unchanged.
+
 ---
 
 ## 1. What is claimed
 
-One `configure_dual_export()` call, one simulated MLflow LLM trace, one process,
+One `configure_tracing()` call, one simulated MLflow LLM trace, one process,
 one run — and that trace is readable from the MLflow Tracking Server store **and**
 present in a fake Revenium OTLP collector's decoded `ExportTraceServiceRequest`,
 carrying `gen_ai.*` attributes with integer token counts, the `revenium.*`
@@ -61,7 +74,7 @@ os.environ["MLFLOW_TRACKING_URI"] = f"sqlite:///{tempfile.mkdtemp()}/tracking.db
 with FakeOTLPCollector() as collector:
     import mlflow
 
-    handle = configure_dual_export(otlp_traces_endpoint=collector.endpoint, api_key="rev_mk_FAKE")
+    handle = configure_tracing(otlp_traces_endpoint=collector.endpoint, api_key="rev_mk_FAKE")
     with attribution(subscriber_id="sub-gate-01", organization_name="org-gate-01"):
         with mlflow.start_span(name="gate-chat", span_type="CHAT_MODEL") as span:
             span.set_attribute("mlflow.llm.model", "gpt-4o")
@@ -137,7 +150,7 @@ These are what the suite regenerates and checks this file against.
 ```
 mlflow.__version__ = 3.16.0
 opentelemetry-sdk = 1.44.0
-store spans without configure_dual_export = 1
+store spans without configure_tracing = 1
 store spans for the gate trace = 1
 store spans for the mixed trace = 2
 exported spans for the gate trace = 1
@@ -353,7 +366,7 @@ will be read later by someone deciding what has already been checked.
   round-trip measurements; PROJECT.md forbids the call that would settle them.
 - **`telemetry.sdk.version` is knowingly wrong.** §5.
 - **No idempotency, no eviction, no reinstall.** Calling
-  `configure_dual_export()` twice attaches two pipelines and double-exports every
+  `configure_tracing()` twice attaches two pipelines and double-exports every
   span. `handle.is_active()` and `handle.reinstall()` raise. Plan 04-04.
 - **No failure visibility.** `BatchSpanProcessor` discards
   `SpanExportResult.FAILURE` silently, so a 401 or a 500 from a real endpoint

@@ -31,7 +31,7 @@ sets state, and that the processor constructs and exposes all four
 ``SpanProcessor`` methods. The rationale each one carried is what survives:
 deleting them would have removed the only assertions in this file standing
 between "implemented" and "accepts the call and returns", which is the exact
-shape OI-02 names. ``configure_dual_export`` and ``ReveniumExportHandle`` are
+shape OI-02 names. ``configure_tracing`` and ``ReveniumExportHandle`` are
 Phase 4 and still raise.
 
 *The two halves of the SDK stay disjoint.* The tracing package must not import
@@ -57,7 +57,7 @@ from revenium_mlflow.tracing import (
     ReveniumExportHandle,
     _scope,
     attribution,
-    configure_dual_export,
+    configure_tracing,
 )
 
 pytestmark = pytest.mark.unit
@@ -198,7 +198,7 @@ class _RecordingBatchProcessor(BatchSpanProcessor):
 def _stub_handle(*, batch_processor: BatchSpanProcessor | None = None) -> ReveniumExportHandle:
     """A handle constructed without configuring anything.
 
-    ``configure_dual_export`` attaches to the *process-global* bridged provider
+    ``configure_tracing`` attaches to the *process-global* bridged provider
     and ``add_span_processor`` cannot be undone, so a test about the handle's own
     methods builds one directly rather than installing one it would then have to
     live with for the rest of the session.
@@ -213,13 +213,13 @@ def _stub_handle(*, batch_processor: BatchSpanProcessor | None = None) -> Reveni
     )
 
 
-def test_configure_dual_export_refuses_to_install_without_a_credential() -> None:
+def test_configure_tracing_refuses_to_install_without_a_credential() -> None:
     """The install entry point must fail loudly, not report a phantom success.
 
     That sentence is why this test existed in Phase 1, when it asserted the
     ``NotImplementedError``, and it is why the test is rewritten here rather than
     deleted — the same treatment the scope test above got when plan 03-01
-    replaced its raise. Plan 04-01 implemented ``configure_dual_export``, so the
+    replaced its raise. Plan 04-01 implemented ``configure_tracing``, so the
     Phase 1 raise is gone; the failure it stood guard against is not.
 
     The shape survives intact in the credential path, and it is the sharpest
@@ -232,13 +232,13 @@ def test_configure_dual_export_refuses_to_install_without_a_credential() -> None
     than report a phantom success" claim, made where it now applies.
     """
     with pytest.raises(ConfigurationError) as excinfo:
-        configure_dual_export(otlp_traces_endpoint="http://127.0.0.1:1/v1/traces")
+        configure_tracing(otlp_traces_endpoint="http://127.0.0.1:1/v1/traces")
     assert "api_key" in str(excinfo.value)
 
 
-def test_configure_dual_export_returns_a_typed_handle_never_none() -> None:
+def test_configure_tracing_returns_a_typed_handle_never_none() -> None:
     """CFG-07: returning ``None`` leaves a caller no way to see what was configured."""
-    annotation = inspect.signature(configure_dual_export).return_annotation
+    annotation = inspect.signature(configure_tracing).return_annotation
     assert annotation is ReveniumExportHandle
 
 

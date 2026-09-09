@@ -294,7 +294,7 @@ class FakeOTLPCollector:
     Use as a context manager::
 
         with FakeOTLPCollector() as collector:
-            handle = configure_dual_export(otlp_traces_endpoint=collector.endpoint, ...)
+            handle = configure_tracing(otlp_traces_endpoint=collector.endpoint, ...)
             ...
             handle.flush(5.0)
             request = collector.assert_received_export()

@@ -9,7 +9,7 @@ This is a Revenium product. It is neither part of, nor endorsed by, the MLflow
 project.
 
 **The published surface is flat (D-01).** Every name a user needs is imported
-from here — ``from revenium_mlflow import configure_dual_export, attribution``
+from here — ``from revenium_mlflow import configure_tracing, attribution``
 — and never from a submodule. The internal split into ``tracing`` (the OTLP
 path) and ``metering`` (the Revenium HTTP path) exists precisely so that
 structure can change without changing anyone's import line, and the two never
@@ -27,7 +27,7 @@ billing-attribution loss rather than an error.
 **This module stays inert (D-12, PKG-09).** It imports neither ``mlflow`` nor
 the compatibility probe, performs no network I/O, reads no environment variable,
 and installs no global tracing state. Importing it must never raise. The MLflow
-capability probe runs inside :func:`configure_dual_export`, where a failure is
+capability probe runs inside :func:`configure_tracing`, where a failure is
 actionable and in context. The one non-stdlib import reached transitively from
 here is ``opentelemetry.sdk.trace``, the public home of the ``SpanProcessor``
 base class; it registers nothing and opens nothing.
@@ -82,7 +82,7 @@ from .tracing import (
     ReveniumAttributionSpanProcessor,
     ReveniumExportHandle,
     attribution,
-    configure_dual_export,
+    configure_tracing,
 )
 
 #: Fallback used when no ``revenium-mlflow`` distribution is installed, which is
@@ -146,7 +146,7 @@ __all__ = [
     "UnsupportedMLflowError",
     "__version__",
     "attribution",
-    "configure_dual_export",
+    "configure_tracing",
     "meter_tool_span",
     "report_job_outcome",
     "validate_connection",

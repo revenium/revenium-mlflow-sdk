@@ -92,7 +92,7 @@ def validate_connection(*, config: ReveniumConfig | None = None) -> ConnectionDi
 
     Args:
         config: The configuration to validate. When ``None``, Phase 6 resolves
-            one the same way :func:`~revenium_mlflow.configure_dual_export`
+            one the same way :func:`~revenium_mlflow.configure_tracing`
             does, so the diagnostic describes what would actually be installed
             rather than a second, differently-resolved configuration.
 

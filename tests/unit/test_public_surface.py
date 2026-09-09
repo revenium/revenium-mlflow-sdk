@@ -47,7 +47,7 @@ _METERING_ROOT = _REPO_ROOT / "src" / "revenium_mlflow" / "metering"
 
 #: The six callables PROJECT.md names as the public API.
 _PUBLIC_CALLABLES = (
-    "configure_dual_export",
+    "configure_tracing",
     "attribution",
     "ReveniumAttributionSpanProcessor",
     "meter_tool_span",
@@ -88,7 +88,7 @@ def test_the_six_public_callables_import_flat_from_the_package() -> None:
     from revenium_mlflow import (
         ReveniumAttributionSpanProcessor,
         attribution,
-        configure_dual_export,
+        configure_tracing,
         meter_tool_span,
         report_job_outcome,
         validate_connection,
@@ -97,7 +97,7 @@ def test_the_six_public_callables_import_flat_from_the_package() -> None:
     assert all(
         obj is not None
         for obj in (
-            configure_dual_export,
+            configure_tracing,
             attribution,
             ReveniumAttributionSpanProcessor,
             meter_tool_span,

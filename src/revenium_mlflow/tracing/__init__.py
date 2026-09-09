@@ -20,12 +20,12 @@ which imports anything outside the standard library.
 """
 
 from .attribution import attribution
-from .install import ReveniumExportHandle, configure_dual_export
+from .install import ReveniumExportHandle, configure_tracing
 from .processor import ReveniumAttributionSpanProcessor
 
 __all__ = [
     "ReveniumAttributionSpanProcessor",
     "ReveniumExportHandle",
     "attribution",
-    "configure_dual_export",
+    "configure_tracing",
 ]

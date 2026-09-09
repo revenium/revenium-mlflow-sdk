@@ -1,7 +1,7 @@
 """The install entry point and the handle it returns.
 
 Phase 1 published the shape; plan 04-01 filled in the two members the integration
-gate needs — :func:`configure_dual_export` and
+gate needs — :func:`configure_tracing` and
 :meth:`ReveniumExportHandle.flush`. :meth:`ReveniumExportHandle.is_active` and
 :meth:`ReveniumExportHandle.reinstall` still raise, now naming plan 04-04 as
 their owner. That is not an oversight and must not be "finished" with a
@@ -11,12 +11,51 @@ to reject.
 
 Two shapes here are decisions rather than defaults.
 
-**The name stays ``configure_dual_export`` (D-04).** The SDK no longer drives
-MLflow's ``MLFLOW_TRACE_ENABLE_OTLP_DUAL_EXPORT`` mechanism, so the name no
-longer describes the *mechanism*. It still describes the *outcome* — the trace
-reaches both the customer's Tracking Server and Revenium — and the outcome is
-what a caller is choosing when they type it. Renaming a published entry point
-costs every user an import change and buys a more literal name for one release.
+**The entry point is named ``configure_tracing``, and it was ``configure_dual_export``
+until 2026-09-09 (supersedes D-04).** D-04 kept the old name on the argument that
+renaming a published entry point costs every user an import change. That argument
+does not apply: this project's delivery boundary is build artifacts only, nothing
+has been published, and there is no external importer to migrate — the same fact
+plan 01-05 already recorded when it rated the name one-way. With that cost at
+zero, three things were wrong with the old name and a human chose to fix them.
+
+*MLflow owns the term "dual export".*
+``MLFLOW_TRACE_ENABLE_OTLP_DUAL_EXPORT`` is a real MLflow environment variable
+(``mlflow/environment_variables.py:1017``, consumed at
+``mlflow/tracing/provider.py:855``), and this SDK deliberately does not use it —
+it attaches its own exporter to the bridged provider, because MLflow's built-in
+path drops cache tokens, consumes the process's single OTLP endpoint slot, and
+often omits ``gen_ai.provider.name``. So the old name named an MLflow feature
+this function *bypasses*, which misleads exactly the reader who knows MLflow
+best into thinking the call toggles that flag.
+
+*The old name described half the function.* Two processors are installed below,
+not one: the attribution processor that stamps ``revenium.*`` and the batch
+exporter that ships spans. "Export" named the second and was silent about the
+first.
+
+*The codebase already disagreed with it.* The returned handle exposes
+``is_active()`` and ``reinstall()``, and plan 04-04 is titled "processor eviction
+and reinstall". Install vocabulary was already the house style everywhere except
+the function that does the installing.
+
+``configure_tracing`` specifically, because both installed processors are
+tracing-layer concerns, it aligns with the ``tracing`` subpackage this module
+lives in, and it cannot be read as covering the sibling ``metering`` subpackage
+that Phase 5 fills in with tool events and job outcomes. The three alternatives
+were rejected on the record: ``install()`` pairs with ``reinstall()`` but reads
+as packaging at module level; ``configure()`` says nothing about scope and turns
+ambiguous the moment Phase 5 lands; ``configure_metering()`` collides with the
+``metering`` subpackage and claims a scope this function does not have.
+
+**No alias was left behind.** A deprecated ``configure_dual_export = configure_tracing``
+would be dead weight against zero installed users, and it would leave two names
+for one entry point — both of which then have to be explained, and one of which
+still names the MLflow mechanism this SDK bypasses.
+
+The phrase "dual export" survives where it describes the *topology* — one trace,
+two destinations — which is what ``tests/unit/test_dual_export_gate.py`` and
+``docs/verification/exp-03-dual-export.md`` are about, and remains accurate.
 
 **It returns a typed handle, never ``None`` (CFG-07).** A configure call that
 returns nothing leaves an operator with no way to answer "is it actually
@@ -58,7 +97,7 @@ from revenium_mlflow.errors import ConfigurationError as _ConfigurationError
 from .exporter import ReveniumSpanExporter as _ReveniumSpanExporter
 from .processor import ReveniumAttributionSpanProcessor as _ReveniumAttributionSpanProcessor
 
-__all__ = ["ReveniumExportHandle", "configure_dual_export"]
+__all__ = ["ReveniumExportHandle", "configure_tracing"]
 
 #: The default bound on :meth:`ReveniumExportHandle.flush`, in seconds. Bounded
 #: rather than indefinite on purpose: an unbounded flush against a hung
@@ -82,7 +121,7 @@ _PHASE_4_04 = (
 class ReveniumExportHandle:
     """The live handle to an installed Revenium export path (CFG-07).
 
-    Returned by :func:`configure_dual_export` so the caller holds something they
+    Returned by :func:`configure_tracing` so the caller holds something they
     can interrogate and repair, instead of a ``None`` that says nothing. It holds
     the provider it attached to, both processors it attached, and the
     configuration that was resolved — the three things every remaining method in
@@ -182,7 +221,7 @@ def _resolve_config(
     )
 
 
-def configure_dual_export(
+def configure_tracing(
     *,
     config: ReveniumConfig | None = None,
     otlp_traces_endpoint: str | None = None,
@@ -190,9 +229,15 @@ def configure_dual_export(
 ) -> ReveniumExportHandle:
     """Attach Revenium's span processor and exporter to MLflow's tracer provider.
 
-    "Dual" is the outcome, not the mechanism (D-04): the customer's Tracking
-    Server keeps receiving every trace and Revenium receives the same traces
-    enriched with attribution. Nothing is diverted and nothing is replaced.
+    Two destinations, and nothing is diverted or replaced: the customer's
+    Tracking Server keeps receiving every trace, and Revenium receives the same
+    traces enriched with attribution.
+
+    Named ``configure_tracing`` because it installs two tracing-layer processors
+    — the ``revenium.*`` stamp and the OTLP export. It was called
+    ``configure_dual_export`` until 2026-09-09; see this module's docstring for
+    the recorded reasoning, including why "dual export" was the wrong name to
+    borrow (MLflow owns it, and this SDK bypasses the mechanism it names).
 
     **This function must never write the process-global OTLP variables**
     (CFG-03). ``OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`` and
@@ -264,7 +309,7 @@ def configure_dual_export(
     if not resolved.api_key:
         raise _ConfigurationError(
             "no metering credential was supplied. Pass api_key= to "
-            "configure_dual_export(), or set ReveniumConfig.api_key. Exporting "
+            "configure_tracing(), or set ReveniumConfig.api_key. Exporting "
             "without one would be rejected remotely and the rejection would be "
             "discarded by the batch processor, leaving no local signal at all."
         )

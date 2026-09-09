@@ -42,7 +42,7 @@ import pytest
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
-from revenium_mlflow import ReveniumExportHandle, attribution, configure_dual_export
+from revenium_mlflow import ReveniumExportHandle, attribution, configure_tracing
 from revenium_mlflow.tracing.processor import ReveniumAttributionSpanProcessor
 from tests.fixtures.collector import ExportedSpan, FakeOTLPCollector
 
@@ -100,7 +100,7 @@ _EVIDENCE_DOCUMENT = (
 class _Gate:
     """Everything one run of the fixture observed, captured once and asserted many times."""
 
-    #: The handle ``configure_dual_export`` returned.
+    #: The handle ``configure_tracing`` returned.
     handle: ReveniumExportHandle
 
     #: Processor class names on the bridged provider, before and after configure.
@@ -186,7 +186,7 @@ def gate(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Gate]:
 
     The sequence is fixed and each step depends on the one before it:
 
-    1. A baseline trace **before** ``configure_dual_export`` — the control for
+    1. A baseline trace **before** ``configure_tracing`` — the control for
        T-04-04's "MLflow's own export is unchanged" claim. Without it, "one span
        in the store" is a number with nothing to compare against.
     2. Configure, recording the processor list on either side of the call.
@@ -211,7 +211,7 @@ def gate(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Gate]:
             baseline_trace_id = _chat_span(mlflow, _BASELINE_SPAN)
             baseline_count = _store_span_count(mlflow, baseline_trace_id)
 
-            handle = configure_dual_export(
+            handle = configure_tracing(
                 otlp_traces_endpoint=collector.endpoint,
                 api_key=_FAKE_API_KEY,
             )
@@ -304,7 +304,7 @@ def test_the_collector_received_a_decodable_export(gate: _Gate) -> None:
     )
 
 
-def test_configure_dual_export_returns_a_typed_handle(gate: _Gate) -> None:
+def test_configure_tracing_returns_a_typed_handle(gate: _Gate) -> None:
     """CFG-07: never ``None``. A configure call that returns nothing leaves an
     operator with no way to answer "is it actually installed?"."""
     assert isinstance(gate.handle, ReveniumExportHandle)
@@ -490,7 +490,7 @@ def test_mlflows_own_export_is_unchanged_by_configuring(gate: _Gate) -> None:
 
     The exported span is *rebuilt*, never mutated, so the object MLflow's own
     processor already exported is never touched. The baseline trace ran before
-    ``configure_dual_export`` and is the control — without it this is a number
+    ``configure_tracing`` and is the control — without it this is a number
     with nothing to compare against.
     """
     assert gate.gate_store_span_count == gate.baseline_store_span_count
@@ -541,7 +541,7 @@ def _evidence_lines(gate: _Gate) -> list[str]:
     return [
         f"mlflow.__version__ = {mlflow.__version__}",
         f"opentelemetry-sdk = {otel_sdk_version}",
-        f"store spans without configure_dual_export = {gate.baseline_store_span_count}",
+        f"store spans without configure_tracing = {gate.baseline_store_span_count}",
         f"store spans for the gate trace = {gate.gate_store_span_count}",
         f"store spans for the mixed trace = {gate.mixed_store_span_count}",
         f"exported spans for the gate trace = {len(gate.exported)}",

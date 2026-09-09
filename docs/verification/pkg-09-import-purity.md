@@ -4,12 +4,17 @@ Captured evidence for Phase 01 Plan 06. Every block below is the verbatim stdout
 command shown above it, run on this machine in one session against the working tree at the commit
 this file is committed in.
 
+> **Post-capture note (2026-09-09).** The entry point named in the prose below was
+> renamed `configure_dual_export` → `configure_tracing`. Two prose occurrences were
+> updated; no captured command output in this file contains the name, so no transcript
+> line was touched. The rename is recorded in `src/revenium_mlflow/tracing/install.py`.
+
 **What this file has to prove.** PKG-09 asks that `import revenium_mlflow` be inert: no telemetry
 beacon, no version check, no credential validation, no endpoint reachability probe, and no mutation
 of the process-global OpenTelemetry tracer provider. The host application never opted into anything
 the import itself does, and the tracer provider is single-valued and process-wide, so whatever is
 registered there affects every other library in the process. D-12 is the design answer — the MLflow
-capability probe runs inside `configure_dual_export()`, not at import — and this is the evidence
+capability probe runs inside `configure_tracing()`, not at import — and this is the evidence
 that the answer holds.
 
 **Why a clean result is not automatically a proof.** A transcript showing "no network call was
@@ -234,7 +239,7 @@ taken after the fact can speak to it.
 tracing registration function that would execute during the import. It walks module scope and the
 bodies of `if` / `try` / `with` / `for` / `while` — all of which run at import time — and stops at
 function, method, class and lambda bodies, because a *deferred* registration is precisely the D-12
-design and Phase 4's real `configure_dual_export` will contain one. Decorator and base-class
+design and Phase 4's real `configure_tracing` will contain one. Decorator and base-class
 expressions are walked even though the bodies they are attached to are not, since those expressions
 do evaluate at import time.
 
