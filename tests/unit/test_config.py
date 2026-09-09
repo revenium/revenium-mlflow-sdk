@@ -175,10 +175,23 @@ def test_construction_reads_no_environment_variable(monkeypatch: pytest.MonkeyPa
 
 
 def test_the_module_source_opens_no_socket_and_builds_no_client() -> None:
-    """Nothing in this module dials the endpoint constant it defines (T-01-24)."""
+    """Nothing in this module dials the endpoint constant it defines (T-01-24).
+
+    **Narrowed by plan 04-02, deliberately.** This test also asserted that
+    ``config.py`` contained no ``os.environ`` at all — the right assertion while
+    Phase 1's module performed no resolution, and the wrong one now that CFG-08
+    has landed there. The prohibition it stood for did not go away; it moved to
+    ``tests/unit/test_config_resolution.py``, which pins the *count* of read
+    sites at one and asserts by AST walk that the module writes none. Rewritten
+    rather than deleted, following the precedent set in this repository when
+    plan 03-01 replaced the scope's raise and plan 04-01 replaced the install
+    stub's.
+
+    What stays here is what this test was always about: this module builds no
+    HTTP client and opens no socket, so the endpoint constant it defines is a
+    string and nothing more.
+    """
     source = _CONFIG_SOURCE.read_text(encoding="utf-8")
 
     for forbidden in ("import httpx", "import socket", "import requests", "urlopen"):
         assert forbidden not in source, f"config.py references {forbidden!r}"
-    for forbidden in ("os.environ", "os.getenv", "getenv("):
-        assert forbidden not in source, f"config.py reads the environment via {forbidden!r}"

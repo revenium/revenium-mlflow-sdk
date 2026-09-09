@@ -79,7 +79,6 @@ the cost it carries: sending the credential twice doubles the number of places i
 appears in any captured traffic, log or proxy record.
 """
 
-import dataclasses as _dataclasses
 from typing import Final as _Final
 
 from opentelemetry.sdk.trace import TracerProvider as _SDKTracerProvider
@@ -91,7 +90,9 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor as _BatchSpanProce
 # place. In-package only — the private-access wall guards MLflow and
 # OpenTelemetry internals, not this package talking to itself.
 from revenium_mlflow.config import _HTTP_PROTOBUF as _REQUIRED_OTLP_PROTOCOL
+from revenium_mlflow.config import ENVIRONMENT_VARIABLE_NAMES as _ENVIRONMENT_VARIABLE_NAMES
 from revenium_mlflow.config import ReveniumConfig
+from revenium_mlflow.config import resolve_config as _resolve_config
 from revenium_mlflow.errors import ConfigurationError as _ConfigurationError
 
 from .exporter import ReveniumSpanExporter as _ReveniumSpanExporter
@@ -200,27 +201,6 @@ class ReveniumExportHandle:
         return self._batch_processor.force_flush(int(timeout * 1000))
 
 
-def _resolve_config(
-    config: ReveniumConfig | None,
-    otlp_traces_endpoint: str | None,
-    api_key: str | None,
-) -> ReveniumConfig:
-    """Merge the explicit arguments over the supplied configuration.
-
-    Argument merging only. **No environment variable is read here** — full
-    resolution is CFG-08 and belongs to plan 04-02, which also owns the guarantee
-    that this path never *writes* ``OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`` or
-    ``OTEL_EXPORTER_OTLP_TRACES_HEADERS`` (CFG-03). Doing half of that resolution
-    here would leave two places deciding one value.
-    """
-    resolved = config if config is not None else ReveniumConfig()
-    return _dataclasses.replace(
-        resolved,
-        otlp_traces_endpoint=otlp_traces_endpoint or resolved.otlp_traces_endpoint,
-        api_key=api_key or resolved.api_key,
-    )
-
-
 def configure_tracing(
     *,
     config: ReveniumConfig | None = None,
@@ -248,8 +228,17 @@ def configure_tracing(
     Revenium exporter therefore carries its own endpoint and its own headers on
     its own instance, passed as constructor arguments. Measured during planning:
     with an explicit ``endpoint=``, ``OTLPSpanExporter`` resolves it without
-    consulting the environment and leaves the variable unchanged. Plan 04-02
-    turns that measurement into an asserted byte-identity guard.
+    consulting the environment and leaves the variable unchanged.
+    ``tests/unit/test_otel_slot_untouched.py`` now asserts that byte-identity
+    across this call, in both the previously-unset and previously-set cases, and
+    walks every module in the shipped package for such a write.
+
+    **Where a Revenium value does come from (CFG-08).** The Revenium-named
+    variables, never the OTEL ones:
+    ``REVENIUM_OTLP_TRACES_ENDPOINT`` for the full route,
+    ``REVENIUM_METERING_BASE_URL`` for a base the route is composed onto — the
+    one variable every other Revenium SDK uses to point at a non-production
+    deployment — and ``REVENIUM_METERING_API_KEY`` for the credential.
 
     The MLflow capability probe runs here rather than at import time (D-12), so
     ``import revenium_mlflow`` stays inert and a capability failure surfaces
@@ -263,9 +252,10 @@ def configure_tracing(
     nobody exported — silently, since the export still succeeds.
 
     Args:
-        config: A fully-formed configuration. When ``None``, one is built from
-            the defaults and the remaining arguments. Environment resolution is
-            CFG-08 and lands in plan 04-02.
+        config: A fully-formed configuration. When supplied, the environment is
+            not read at all — see :func:`revenium_mlflow.config.resolve_config`.
+            When ``None``, one is resolved from the arguments, the Revenium-named
+            environment variables, and the defaults, in that order per field.
         otlp_traces_endpoint: Overrides the resolved traces endpoint.
         api_key: The metering credential (``rev_mk_``) used for trace ingest.
 
@@ -287,7 +277,16 @@ def configure_tracing(
     from revenium_mlflow import _compat
 
     _compat.probe()
-    resolved = _resolve_config(config, otlp_traces_endpoint, api_key)
+
+    # Resolution is CFG-08 and lives in ``revenium_mlflow.config`` — the record
+    # and the policy about where its values come from are two things (see that
+    # module's docstring). Called once, at the top, so every value below comes
+    # from one decision rather than from wherever it was first needed.
+    resolved = _resolve_config(
+        config=config,
+        otlp_traces_endpoint=otlp_traces_endpoint,
+        api_key=api_key,
+    )
 
     # CFG-09, asserted rather than assumed. MLflow's own OTLP default is ``grpc``
     # and there is no configuration in which falling through to it is right:
@@ -309,9 +308,11 @@ def configure_tracing(
     if not resolved.api_key:
         raise _ConfigurationError(
             "no metering credential was supplied. Pass api_key= to "
-            "configure_tracing(), or set ReveniumConfig.api_key. Exporting "
-            "without one would be rejected remotely and the rejection would be "
-            "discarded by the batch processor, leaving no local signal at all."
+            "configure_tracing(), set ReveniumConfig.api_key, or export "
+            f"{_ENVIRONMENT_VARIABLE_NAMES['api_key']} — the same variable the "
+            "rest of the Revenium SDKs read. Exporting without one would be "
+            "rejected remotely and the rejection would be discarded by the batch "
+            "processor, leaving no local signal at all."
         )
 
     # Inside the body (D-12). ``import revenium_mlflow`` must stay inert.

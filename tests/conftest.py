@@ -24,6 +24,48 @@ _MLFLOW_QUIET_ENV = {
 }
 
 
+#: The prefix every Revenium-named configuration variable carries. Cleared for
+#: the whole session by the fixture below.
+_REVENIUM_ENV_PREFIX = "REVENIUM_"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _clear_revenium_environment() -> Iterator[None]:
+    """Remove every ``REVENIUM_*`` variable for the session, and restore it after.
+
+    Added by plan 04-02, when ``configure_tracing`` began resolving its endpoint
+    and credential from the environment (CFG-08). Two things that fixes:
+
+    *Determinism.* A developer running this suite with their own
+    ``REVENIUM_METERING_API_KEY`` exported would otherwise change what several
+    tests measure — most sharply
+    ``test_configure_tracing_refuses_to_install_without_a_credential``, which
+    would stop testing the refusal and start testing their shell.
+
+    *Credential safety.* A real key in a developer's environment must not be
+    reachable by any test in a suite whose collectors capture and print request
+    headers. Nothing here needs a live credential and nothing here should be able
+    to find one.
+
+    Session-scoped and autouse, so it is established before the first test rather
+    than depending on any test remembering to ask. Restored exactly on teardown,
+    including the case where a variable was set to the empty string.
+
+    Tests that need a Revenium variable set supply it explicitly — the
+    resolution tests pass their own ``environ`` mapping and never touch the
+    process environment at all.
+    """
+    removed = {
+        name: value for name, value in os.environ.items() if name.startswith(_REVENIUM_ENV_PREFIX)
+    }
+    for name in removed:
+        del os.environ[name]
+    try:
+        yield
+    finally:
+        os.environ.update(removed)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _disable_mlflow_telemetry() -> Iterator[None]:
     """Silence MLflow's outbound telemetry for the whole session.

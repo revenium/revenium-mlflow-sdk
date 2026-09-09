@@ -50,7 +50,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 from revenium_mlflow.attributes import REVENIUM_ATTRIBUTE_KEYS
-from revenium_mlflow.config import ReveniumConfig
+from revenium_mlflow.config import ENVIRONMENT_VARIABLE_NAMES, ReveniumConfig
 from revenium_mlflow.errors import ConfigurationError
 from revenium_mlflow.tracing import (
     ReveniumAttributionSpanProcessor,
@@ -213,7 +213,9 @@ def _stub_handle(*, batch_processor: BatchSpanProcessor | None = None) -> Reveni
     )
 
 
-def test_configure_tracing_refuses_to_install_without_a_credential() -> None:
+def test_configure_tracing_refuses_to_install_without_a_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The install entry point must fail loudly, not report a phantom success.
 
     That sentence is why this test existed in Phase 1, when it asserted the
@@ -230,7 +232,17 @@ def test_configure_tracing_refuses_to_install_without_a_credential() -> None:
     The operator's first evidence would be an invoice missing every model call.
     A ``ConfigurationError`` at configure time is the same "fail loudly rather
     than report a phantom success" claim, made where it now applies.
+
+    **The credential variable is deleted explicitly**, even though
+    ``tests/conftest.py`` clears the whole ``REVENIUM_*`` namespace for the
+    session. Plan 04-02 made ``configure_tracing`` resolve its credential from
+    the environment (CFG-08), so from that point on this assertion's meaning
+    depends on a variable being absent. Depending on a session fixture for that
+    would make the strongest "fails loudly" claim in the suite quietly
+    conditional on setup that lives in another file.
     """
+    monkeypatch.delenv(ENVIRONMENT_VARIABLE_NAMES["api_key"], raising=False)
+
     with pytest.raises(ConfigurationError) as excinfo:
         configure_tracing(otlp_traces_endpoint="http://127.0.0.1:1/v1/traces")
     assert "api_key" in str(excinfo.value)
